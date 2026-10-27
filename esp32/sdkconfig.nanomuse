@@ -1,0 +1,22 @@
+# Load last, after the Muse and CoreS3 board overlays.
+CONFIG_MUSE_NANOMUSE=y
+CONFIG_MUSE_HATCH=y
+CONFIG_MUSE_CJK_FONT=y
+CONFIG_GADGET_SDK_TOKEN_WARN=n
+# CONFIG_HOMEHUB_SUPPORT_BUG_REPORT is not set
+# CONFIG_HOMEHUB_OTA_ENABLED is not set
+# Set Wi-Fi, gateway URL and device key using this build's menuconfig or USB.
+
+# Keep code and constants in flash. On CoreS3, PSRAM XIP produced an
+# IllegalInstruction during SPI/display initialization despite verified flash.
+# PSRAM remains enabled for the UI, recording and incremental playback buffers.
+# CONFIG_SPIRAM_XIP_FROM_PSRAM is not set
+# CONFIG_SPIRAM_FETCH_INSTRUCTIONS is not set
+# CONFIG_SPIRAM_RODATA is not set
+
+# CoreS3 freeze captured in taskLVGL -> lv_draw_dispatch_wait_for_request.
+# Render synchronously inside esp_lvgl_port's serialized UI task; its display
+# mutex still protects external UI calls. No asynchronous swdraw notifications.
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=1
+CONFIG_LV_OS_NONE=y
+# CONFIG_LV_OS_FREERTOS is not set

@@ -221,6 +221,33 @@ menu "Muse"
             to pay for the CPU's light-sleep retention memory, which it
             takes at boot and keeps.
 
+    config MUSE_NANOMUSE
+        bool "Use a local nanoMuse gateway"
+        depends on MUSE_ENABLED && SPIRAM && MUSE_BOARD_M5STACK_CORES3
+        depends on !MUSE_POWER_TEST && !HOMEHUB_PIPELINE_BENCH
+        default n
+        select MUSE_HATCH
+        help
+            Starts the CoreS3 UI and Wi-Fi without the Muse cloud pairing
+            stack. Text and 16 kHz mono recordings go to your LAN gateway.
+            No Muse SDK token is needed in this mode.
+
+    config MUSE_GATEWAY_URL
+        string "nanoMuse gateway WebSocket URL"
+        depends on MUSE_NANOMUSE
+        default ""
+        help
+            For example ws://192.168.1.10:8765/device. Use only on a trusted
+            LAN, or wss:// with a publicly trusted TLS certificate.
+
+    config MUSE_GATEWAY_KEY
+        string "nanoMuse device key"
+        depends on MUSE_NANOMUSE
+        default ""
+        help
+            A 16-127 character key shared with the gateway, not your nanoMuse server
+            token or a model API key. It is embedded in this firmware image.
+
     config MUSE_HATCH
         bool "Muse's own voice session"
         depends on MUSE_ENABLED

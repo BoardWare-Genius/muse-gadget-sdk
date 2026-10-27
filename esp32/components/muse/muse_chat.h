@@ -44,6 +44,9 @@ extern "C" {
  * up to 1,023 UTF-8 bytes; at most two completed messages await processing.
  * Bursts can omit older messages; subscription lines above 12 KiB are skipped.
  * Use the Muse app for the full conversation.
+ *
+ * CONFIG_MUSE_NANOMUSE uses the LAN gateway instead: text chat, PCM uploads,
+ * and optional 16 kHz PCM speech playback for push-to-talk replies.
  */
 
 typedef enum {

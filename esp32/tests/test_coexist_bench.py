@@ -49,10 +49,31 @@ class BenchServerTest(unittest.TestCase):
         cls.server = _load_server()
 
     def _http(self):
-        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self.server.TunnelHTTP)
+        # The client can receive the last byte before the server writes its
+        # timing log. Keep stdout captured until that handler has returned.
+        done = self.http_done = threading.Event()
+        parent = self.server.TunnelHTTP
+
+        class Handler(parent):
+            def do_GET(self):
+                try:
+                    super().do_GET()
+                finally:
+                    done.set()
+
+            def do_POST(self):
+                try:
+                    super().do_POST()
+                finally:
+                    done.set()
+
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
-        return http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=10)
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=10)
+        self.addCleanup(conn.close)
+        return conn
 
     def test_blob_streams_the_requested_bytes(self) -> None:
         conn = self._http()
@@ -60,6 +81,7 @@ class BenchServerTest(unittest.TestCase):
             conn.request("GET", "/blob?bytes=200000")
             resp = conn.getresponse()
             body = resp.read()
+            self.assertTrue(self.http_done.wait(2), "HTTP handler did not finish")
         self.assertEqual(resp.status, 200)
         self.assertEqual(len(body), 200000)
         self.assertEqual(int(resp.getheader("Content-Length")), 200000)
@@ -71,6 +93,7 @@ class BenchServerTest(unittest.TestCase):
             conn.request("POST", "/sink", body=b"x" * 150000)
             resp = conn.getresponse()
             body = resp.read().decode()
+            self.assertTrue(self.http_done.wait(2), "HTTP handler did not finish")
         self.assertEqual(resp.status, 200)
         self.assertIn('"bytes":150000', body)
         self.assertRegex(out.getvalue(), r"http POST /sink 150000 B in")

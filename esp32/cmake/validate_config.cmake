@@ -71,7 +71,9 @@ endif()
 # A token from gadgets.muse.ai is mgst_ plus 43 canonical base64url characters.
 # Manufacturer builds pair with fleet attestation instead, and internal builds
 # without a token disable CONFIG_GADGET_SDK_TOKEN_WARN.
-if("${CONFIG_GADGET_SDK_TOKEN}" STREQUAL "")
+if(CONFIG_MUSE_NANOMUSE)
+    # Local gateway mode never calls the official account API.
+elseif("${CONFIG_GADGET_SDK_TOKEN}" STREQUAL "")
     if(CONFIG_GADGET_SDK_TOKEN_WARN AND NOT CONFIG_HOMEHUB_PAIRING_EFUSE_AUTH)
         set(GADGET_SDK_TOKEN_WARNING
             "No SDK token: set CONFIG_GADGET_SDK_TOKEN (idf.py menuconfig > ESP32 Device SDK)"

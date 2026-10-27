@@ -28,6 +28,10 @@
 
 #include "muse_chat.h"
 #include "muse_link.h"
+#if CONFIG_MUSE_NANOMUSE
+#include "muse_nanomuse.h"
+#include "muse_ui.h"
+#endif
 #include "muse_settings.h"
 #include "muse_state.h"
 #include "muse_voice.h"
@@ -80,6 +84,30 @@ static int build_status(char *out, size_t len)
     muse_hatch_status_t h;
     muse_hatch_status(&h);
     muse_power_t p = muse_state_power();
+#if CONFIG_MUSE_NANOMUSE
+    const esp_app_desc_t *app = esp_app_get_description();
+    char sha[17];
+    for (int i = 0; i < 8; ++i) snprintf(sha + i * 2, 3, "%02x", app->app_elf_sha256[i]);
+    float mode_age;
+    muse_mode_t mode = muse_state_mode(&mode_age);
+    char url[MUSE_GATEWAY_URL_MAX + 1], key[MUSE_GATEWAY_KEY_MAX + 1];
+    char url_e[MUSE_GATEWAY_URL_MAX * 2 + 1], ssid_e[MUSE_SSID_MAX * 2 + 1];
+    muse_settings_gateway(url, key);
+    json_str(url_e, sizeof(url_e), url);
+    json_str(ssid_e, sizeof(ssid_e), w.ssid);
+    bool has_key = key[0];
+    memset(key, 0, sizeof(key));
+    return snprintf(out, len,
+                    "{\"backend\":\"nanomuse\",\"fw\":\"%s\",\"battery\":%d,"
+                    "\"build_date\":\"%s\",\"build_time\":\"%s\",\"elf_sha256\":\"%s\","
+                    "\"mode\":%d,\"mode_age_s\":%.0f,\"reply_phase\":%d,\"ui_frames\":%u,"
+                    "\"wifi\":{\"ssid\":\"%s\",\"ip\":\"%s\",\"state\":\"%s\"},"
+                    "\"gateway\":{\"url\":\"%s\",\"key\":%s,\"state\":\"%s\"}}",
+                    app->version, p.battery_pct, app->date, app->time, sha,
+                    (int)mode, (double)mode_age, (int)muse_nanomuse_reply_phase(), (unsigned)muse_ui_frame_count(),
+                    ssid_e, w.ip, wifi_state_name(w.state),
+                    url_e, has_key ? "true" : "false", muse_hatch_state_name(h.state));
+#else
     char host[MUSE_HOST_MAX + 1], vm[MUSE_VM_MAX + 1];
     muse_settings_hatch_host(host);
     muse_settings_hatch_vm(vm);
@@ -103,6 +131,7 @@ static int build_status(char *out, size_t len)
                     muse_settings_volume(), muse_settings_speaker_on() ? "true" : "false",
                     muse_settings_mic_gain(), muse_settings_brightness(),
                     muse_settings_sleep_s(), last_e);
+#endif
 }
 
 static bool parse_int(const char *v, int lo, int hi, int *out)
@@ -149,6 +178,14 @@ static void run_command(char *cmd)
         } else {
             muse_settings_set_wifi("", "");   /* every saved network */
         }
+#if CONFIG_MUSE_NANOMUSE
+    } else if (!strcmp(cmd, "gateway.url")) {
+        if (muse_settings_set_gateway_url(v) != ESP_OK) res = "error: invalid URL";
+    } else if (!strcmp(cmd, "gateway.key")) {
+        if (muse_settings_set_gateway_key(v) != ESP_OK) res = "error: invalid key";
+    } else if (!strcmp(cmd, "gateway.test")) {
+        muse_hatch_test();
+#endif
     } else if (!strcmp(cmd, "hatch.host")) {
         muse_settings_set_hatch_host(v);
     } else if (!strcmp(cmd, "hatch.vm")) {
@@ -176,7 +213,7 @@ static void run_command(char *cmd)
     }
 
     /* Never echo secrets back. */
-    bool secret = !strcmp(cmd, "wifi.pass") || !strncmp(cmd, "hatch.token", 11);
+    bool secret = !strcmp(cmd, "gateway.key") || !strcmp(cmd, "wifi.pass") || !strncmp(cmd, "hatch.token", 11);
     snprintf(s_last, sizeof(s_last), "%s: %s", cmd, res);
     ESP_LOGI(TAG, "cmd %s%s%s -> %s", cmd, secret ? "" : "=", secret ? "" : v, res);
     muse_state_poke();

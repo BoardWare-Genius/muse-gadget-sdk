@@ -1,0 +1,31 @@
+[gateway]
+host = "0.0.0.0"
+port = 8765
+key_env = "CORES3_DEVICE_KEY"
+# Opt in to saving microphone recordings (otherwise they remain in RAM only).
+# recordings_dir = "recordings"
+recordings_keep = 20
+
+[nanomuse]
+url = "http://127.0.0.1:8787"
+token_env = "NANOMUSE_SERVER_TOKEN"
+turn_timeout = 150
+
+# Optional multipart transcription endpoint, returning {"text":"..."}.
+# Model keys stay in this process, never on the CoreS3.
+[asr]
+provider = "openai" # "blackbox" for ASR Blackbox (see config.blackbox.example.toml).
+url = ""
+model = "whisper-1"
+language = "zh"
+key_env = "ASR_API_KEY"
+
+# Optional OpenAI-compatible speech endpoint. Must return WAV; ffmpeg converts
+# the service's sample rate/channels to the CoreS3's 16 kHz mono PCM.
+[tts]
+provider = "openai" # "blackbox" for TTS Blackbox.
+url = ""
+model = "tts-1"
+voice = "alloy"
+key_env = "TTS_API_KEY"
+# speed = 1.0

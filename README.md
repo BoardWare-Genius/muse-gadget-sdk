@@ -37,6 +37,8 @@ warranties, brownouts, or bankruptcies. Proceed at your own risk!
 | [**ESP32 Device SDK**](esp32) | Connect your ESP32 board to Muse through our open source SDK. Throw in a screen to show images, add audio in and out, or wire up other sensors. |
 | [**Linux Device SDK**](linux) | Turn that spare Raspberry Pi or Linux box into a Muse gadget. Hack in your own commands to let Muse handle sysadmin chores or your Home Assistant setup. |
 
+M5Stack CoreS3 users can also try the opt-in [local nanoMuse gateway](nanomuse-gateway/README.md) (text chat, recording uploads, optional speech recognition and spoken replies).
+
 Before you flash or pair a gadget, get an
 [SDK token](https://gadgets.muse.ai/settings/sdk-tokens) and review the
 [Gadget SDK Terms](https://gadgets.muse.ai/sdk-terms). Every gadget needs a

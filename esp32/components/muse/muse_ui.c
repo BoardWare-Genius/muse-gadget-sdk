@@ -39,6 +39,9 @@
 #include "muse_link.h"
 #include "muse_mem.h"
 #include "muse_menu.h"
+#if CONFIG_MUSE_NANOMUSE
+#include "muse_nanomuse.h"
+#endif
 #include "muse_pixel.h"
 #include "muse_settings.h"
 #include "muse_settings_ui.h"
@@ -1448,6 +1451,14 @@ static void update_status(muse_mode_t mode, float now)
 {
     uint32_t accent = muse_pixel_accent(mode);
     const char *name = mode == MUSE_MODE_IDLE ? s_idle_name : MODE_NAMES[mode];
+    bool thinking = mode == MUSE_MODE_THINKING;
+#if CONFIG_MUSE_NANOMUSE
+    if (thinking) {
+        muse_nanomuse_reply_phase_t phase = muse_nanomuse_reply_phase();
+        if (phase == MUSE_NANOMUSE_PREPARING_AUDIO) name = "PREPARING AUDIO";
+        else if (phase == MUSE_NANOMUSE_READING) { name = "REPLY"; thinking = false; }
+    }
+#endif
 
     if (name != s_shown_name) {
         lv_label_set_text(s_state_lbl, name);
@@ -1469,10 +1480,10 @@ static void update_status(muse_mode_t mode, float now)
     int ring = 0;
     if (mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_SPEAKING) {
         ring = (int)(muse_state_progress() * RING_RANGE);
-    } else if (mode == MUSE_MODE_THINKING) {
+    } else if (thinking) {
         ring = RING_RANGE / 6;
     }
-    if (s_ring && mode == MUSE_MODE_THINKING) {
+    if (s_ring && thinking) {
         /* Move the indicator rather than rotate the arc: a rotation redraws
          * the whole ring, and with it the whole screen. */
         int start = (int)(now * 300.0f) % 360;
@@ -1488,7 +1499,7 @@ static void update_status(muse_mode_t mode, float now)
         }
     } else {
         /* Bar along the bottom edge; a sliding segment while thinking. */
-        int x = mode == MUSE_MODE_THINKING ? (int)(now * s_w) % s_w : 0;
+        int x = thinking ? (int)(now * s_w) % s_w : 0;
         int w = ring * s_w / RING_RANGE;
         if (ring != s_ring_value || x) {
             lv_obj_set_width(s_bar, w);
@@ -1596,8 +1607,13 @@ void muse_ui_request_snapshot(void)
     s_snapshot = true;
 }
 
+static volatile uint32_t s_frame_count;
+
+uint32_t muse_ui_frame_count(void) { return s_frame_count; }
+
 static void frame_tick(lv_timer_t *timer)
 {
+    ++s_frame_count;
 #if LV_USE_SNAPSHOT
     if (s_bench_page >= 0) {
         bool settings = s_bench_page != 0;
@@ -1651,6 +1667,10 @@ static void frame_tick(lv_timer_t *timer)
         .level = s_level,
         .happy = muse_state_happiness(),
     };
+#if CONFIG_MUSE_NANOMUSE
+    if (mode == MUSE_MODE_THINKING && muse_nanomuse_reply_phase() == MUSE_NANOMUSE_READING)
+        pose.mode = MUSE_MODE_IDLE;
+#endif
     muse_pixel_render(&pose);
     invalidate_muse();
 

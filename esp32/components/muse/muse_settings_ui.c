@@ -87,9 +87,11 @@ static int64_t s_forget_armed_us;
 static char s_join_ssid[MUSE_SSID_MAX + 1];
 
 /* Hatch page. */
-static lv_obj_t *s_hatch_status, *s_hatch_host, *s_hatch_vm, *s_hatch_token;
-static lv_obj_t *s_link_status, *s_link_reset_lbl;
+static lv_obj_t *s_hatch_status, *s_hatch_host, *s_hatch_token;
+#if !CONFIG_MUSE_NANOMUSE
+static lv_obj_t *s_hatch_vm, *s_link_status, *s_link_reset_lbl;
 static int64_t s_link_reset_armed_us;
+#endif
 
 /* Bluetooth page. */
 static lv_obj_t *s_ble_sw, *s_ble_status;
@@ -770,8 +772,12 @@ static void build_wifi_page(lv_obj_t *tile)
         snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
         lv_label_set_text(mac, buf);
     }
+#if CONFIG_MUSE_NANOMUSE
+    note(list, "Muse remembers one network in local gateway mode. Tap a network to connect.");
+#else
     note(list, "Muse remembers up to 8 networks and joins the strongest one in range. Tap a saved one twice to "
                "forget it.");
+#endif
 }
 
 static void tick_wifi(void)
@@ -821,6 +827,7 @@ static void tick_wifi(void)
 
 /* ---------- Hatch ---------- */
 
+#if !CONFIG_MUSE_NANOMUSE
 static void on_hatch_host_done(const char *text) { muse_settings_set_hatch_host(text); }
 static void on_hatch_vm_done(const char *text) { muse_settings_set_hatch_vm(text); }
 
@@ -853,12 +860,15 @@ static void on_hatch_token(lv_event_t *e)
     open_text("Device token", "", true, MUSE_TOKEN_MAX, "Empty keeps the current one", on_hatch_token_done, s_hatch);
 }
 
+#endif
+
 static void on_hatch_test(lv_event_t *e)
 {
     (void)e;
     muse_hatch_test();
 }
 
+#if !CONFIG_MUSE_NANOMUSE
 /* Two taps within a few seconds: this wipes Wi-Fi and the Muse app pairing. */
 static void on_link_reset(lv_event_t *e)
 {
@@ -873,9 +883,39 @@ static void on_link_reset(lv_event_t *e)
     set_text(s_link_reset_lbl, "Tap again to reset");
 }
 
+#endif
+
+#if CONFIG_MUSE_NANOMUSE
+static void on_gateway_url_done(const char *text) { muse_settings_set_gateway_url(text); }
+static void on_gateway_key_done(const char *text) { if (text[0]) muse_settings_set_gateway_key(text); }
+static void on_gateway_url(lv_event_t *e)
+{
+    (void)e;
+    char url[MUSE_GATEWAY_URL_MAX + 1];
+    muse_settings_gateway(url, NULL);
+    open_text("Gateway URL", url, false, MUSE_GATEWAY_URL_MAX,
+              "ws://computer-ip:8765/device", on_gateway_url_done, s_hatch);
+}
+static void on_gateway_key(lv_event_t *e)
+{
+    (void)e;
+    open_text("Device key", "", true, MUSE_GATEWAY_KEY_MAX,
+              "Empty keeps the current key", on_gateway_key_done, s_hatch);
+}
+#endif
+
 static void build_hatch_page(lv_obj_t *tile)
 {
     lv_obj_t *list;
+#if CONFIG_MUSE_NANOMUSE
+    s_hatch = page(tile, "NANOMUSE", true, &list);
+    s_hatch_status = note(list, "");
+    row(list, NULL, "Gateway URL", &s_hatch_host, on_gateway_url, NULL);
+    row(list, NULL, "Device key", &s_hatch_token, on_gateway_key, NULL);
+    button(list, "Reconnect", COLOR_ACCENT, on_hatch_test, NULL);
+    note(list, "Connect to your computer on the same Wi-Fi. Hold the power key to upload a recording. "
+               "Speech recognition is configured on the computer. Replies are text.");
+#else
     s_hatch = page(tile, "MUSE", true, &list);
     s_link_reset_armed_us = 0;
     s_link_status = note(list, "");
@@ -888,10 +928,22 @@ static void build_hatch_page(lv_obj_t *tile)
     note(list, "Pair with the Muse app to use your account; a device token here overrides it, and a long one is "
                "easier to send over Bluetooth. The VM ID picks one of your VMs. "
                "Reset pairing forgets Wi-Fi and the app pairing, then restarts.");
+#endif
 }
 
 static void tick_hatch(void)
 {
+#if CONFIG_MUSE_NANOMUSE
+    muse_hatch_status_t status;
+    muse_hatch_status(&status);
+    char summary[96], url[MUSE_GATEWAY_URL_MAX + 1], key[MUSE_GATEWAY_KEY_MAX + 1];
+    snprintf(summary, sizeof(summary), "%s\n%s", muse_hatch_state_name(status.state), status.detail);
+    set_text(s_hatch_status, summary);
+    muse_settings_gateway(url, key);
+    set_text(s_hatch_host, url[0] ? url : "Not set");
+    set_text(s_hatch_token, key[0] ? "Set" : "Not set");
+    memset(key, 0, sizeof(key));
+#else
     char link[64];
     snprintf(link, sizeof(link), "Muse app: %s\n%s", muse_link_hatch_linked() ? "paired" : "not paired",
              muse_link_state_name(muse_link_state()));
@@ -917,10 +969,12 @@ static void tick_hatch(void)
     size_t n = muse_settings_hatch_token_len();
     snprintf(buf, sizeof(buf), n ? "Set (%u chars)" : "Not set", (unsigned)n);
     set_text(s_hatch_token, buf);
+#endif
 }
 
 /* ---------- Bluetooth ---------- */
 
+#if !CONFIG_MUSE_NANOMUSE
 static void on_ble_sw(lv_event_t *e)
 {
     muse_settings_set_ble_on(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
@@ -942,6 +996,8 @@ static void build_ble_page(lv_obj_t *tile)
     note(list, "When on, Muse is visible to phones nearby. Open tools/ble_setup.html in Chrome, "
                "connect, and enter the code Muse shows to pair.");
 }
+
+#endif
 
 static void tick_ble(void)
 {
@@ -1245,7 +1301,9 @@ static void build_power_page(lv_obj_t *tile)
 
 static const page_t WIFI = { &s_wifi, build_wifi_page };
 static const page_t HATCH = { &s_hatch, build_hatch_page };
+#if !CONFIG_MUSE_NANOMUSE
 static const page_t BLE = { &s_ble, build_ble_page };
+#endif
 static const page_t SOUND = { &s_sound, build_sound_page };
 static const page_t SLEEP = { &s_sleep, build_sleep_page };
 static const page_t BATTERY = { &s_battery, build_battery_page };
@@ -1257,7 +1315,9 @@ static void build_home(lv_obj_t *tile)
     s_home = page(tile, "SETTINGS", false, &list);
     row(list, LV_SYMBOL_WIFI, "Wi-Fi", &s_home_wifi, on_nav, (void *)&WIFI);
     row(list, LV_SYMBOL_HOME, "Muse", &s_home_hatch, on_nav, (void *)&HATCH);
+#if !CONFIG_MUSE_NANOMUSE
     row(list, LV_SYMBOL_BLUETOOTH, "Bluetooth", &s_home_ble, on_nav, (void *)&BLE);
+#endif
     row(list, LV_SYMBOL_VOLUME_MAX, "Sound", &s_home_sound, on_nav, (void *)&SOUND);
     row(list, LV_SYMBOL_EYE_CLOSE, "Sleep", &s_home_sleep, on_nav, (void *)&SLEEP);
     row(list, LV_SYMBOL_BATTERY_FULL, "Battery", &s_home_battery, on_nav, (void *)&BATTERY);
@@ -1280,7 +1340,7 @@ static void tick_home(void)
 
     muse_ble_status_t b;
     muse_ble_status(&b);
-    set_text(s_home_ble, b.state == MUSE_BLE_OFF ? "Off" : (b.state == MUSE_BLE_CONNECTED ? "Connected" : "On"));
+    if (s_home_ble) set_text(s_home_ble, b.state == MUSE_BLE_OFF ? "Off" : (b.state == MUSE_BLE_CONNECTED ? "Connected" : "On"));
 
     if (muse_settings_speaker_on()) {
         set_val(s_home_sound, "Vol %d%%", muse_settings_volume());

@@ -44,6 +44,10 @@ static struct {
     char host[MUSE_HOST_MAX + 1];
     char vm[MUSE_VM_MAX + 1];
     char token[MUSE_TOKEN_MAX + 1];
+#if CONFIG_MUSE_NANOMUSE
+    char gateway_url[MUSE_GATEWAY_URL_MAX + 1];
+    char gateway_key[MUSE_GATEWAY_KEY_MAX + 1];
+#endif
 } s = {
     .volume = CONFIG_MUSE_DEFAULT_VOLUME,
     .speaker_on = true,
@@ -52,6 +56,12 @@ static struct {
     .sleep_s = 120,
     .wifi_on = true,
     .host = DEFAULT_HOST,
+#if CONFIG_MUSE_NANOMUSE
+    .ssid = CONFIG_HOMEHUB_WIFI_SSID,
+    .pass = CONFIG_HOMEHUB_WIFI_PASSWORD,
+    .gateway_url = CONFIG_MUSE_GATEWAY_URL,
+    .gateway_key = CONFIG_MUSE_GATEWAY_KEY,
+#endif
 };
 
 static SemaphoreHandle_t s_lock;
@@ -132,6 +142,11 @@ esp_err_t muse_settings_init(void)
     load_str("host", s.host, sizeof(s.host));
     load_str("vm", s.vm, sizeof(s.vm));
     load_str("token", s.token, sizeof(s.token));
+#if CONFIG_MUSE_NANOMUSE
+    load_str("gateway_url", s.gateway_url, sizeof(s.gateway_url));
+    load_str("gateway_key", s.gateway_key, sizeof(s.gateway_key));
+    s.ble_on = false;
+#endif
 
     s.volume = clampi(s.volume, 0, 100);
     s.mic_gain = clampi(s.mic_gain, 0, MUSE_MIC_GAIN_MAX);
@@ -295,3 +310,35 @@ esp_err_t muse_settings_set_hatch_token(const char *token, bool append)
     }
     return err;
 }
+
+#if CONFIG_MUSE_NANOMUSE
+void muse_settings_gateway(char url[MUSE_GATEWAY_URL_MAX + 1], char *key)
+{
+    LOCKED({
+        strlcpy(url, s.gateway_url, MUSE_GATEWAY_URL_MAX + 1);
+        if (key) strlcpy(key, s.gateway_key, MUSE_GATEWAY_KEY_MAX + 1);
+    });
+}
+
+esp_err_t muse_settings_set_gateway_url(const char *url)
+{
+    size_t n = strlen(url);
+    if (n > MUSE_GATEWAY_URL_MAX || (n && strncmp(url, "ws://", 5) && strncmp(url, "wss://", 6))
+        || strchr(url, '@') || strchr(url, '?') || strchr(url, '#')) return ESP_ERR_INVALID_ARG;
+    for (size_t i = 0; i < n; i++) if ((unsigned char)url[i] <= 32) return ESP_ERR_INVALID_ARG;
+    LOCKED({ strlcpy(s.gateway_url, url, sizeof(s.gateway_url)); save_str("gateway_url", url); });
+    notify(MUSE_SETTING_GATEWAY);
+    return ESP_OK;
+}
+
+esp_err_t muse_settings_set_gateway_key(const char *key)
+{
+    size_t n = strlen(key);
+    if (n > MUSE_GATEWAY_KEY_MAX || (n && n < 16)) return ESP_ERR_INVALID_SIZE;
+    for (size_t i = 0; i < n; i++)
+        if ((unsigned char)key[i] < 33 || (unsigned char)key[i] > 126) return ESP_ERR_INVALID_ARG;
+    LOCKED({ strlcpy(s.gateway_key, key, sizeof(s.gateway_key)); save_str("gateway_key", key); });
+    notify(MUSE_SETTING_GATEWAY);
+    return ESP_OK;
+}
+#endif

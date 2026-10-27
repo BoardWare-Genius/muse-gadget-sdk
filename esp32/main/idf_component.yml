@@ -13,7 +13,7 @@
 # limitations under the License.
 
 dependencies:
-  espressif/esp_websocket_client: "~1.2"
+  espressif/esp_websocket_client: "==1.7.0"
   espressif/cjson: "~1.7"
   espressif/led_strip: "~3.0"
   idf:

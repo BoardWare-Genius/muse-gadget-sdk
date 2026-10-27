@@ -355,6 +355,7 @@ static bool hatch_reply(bool *delivered)
     bool done = false, speaking = false, replied = false;
     size_t played = 0;
     int64_t t0 = esp_timer_get_time();
+    int64_t last_audio = t0;
     *delivered = false;
     for (;;) {
         muse_hatch_ev_t ev;
@@ -401,15 +402,22 @@ static bool hatch_reply(bool *delivered)
         if (n) {
             if (!speaking) {
                 speaking = true;
-                muse_state_set_mode(MUSE_MODE_SPEAKING);
                 ESP_LOGI(TAG, "reply audio after %.2fs", (esp_timer_get_time() - t0) / 1e6);
             }
+            muse_state_set_mode(MUSE_MODE_SPEAKING);
             muse_state_set_level(muse_audio_level(buf, n));
             muse_audio_write(buf, n);
+            last_audio = esp_timer_get_time();
             played += n;
         } else if (done) {
             break;
         } else if (speaking) {
+            /* A streaming reply can pause for model/tool work or another
+             * TTS phrase. Silence is not speech; show the waiting phase until
+             * actual PCM resumes instead of appearing stuck in SPEAKING. */
+            if (esp_timer_get_time() - last_audio >= 1000000) {
+                muse_state_set_mode(MUSE_MODE_THINKING);
+            }
             /* Between messages: keep the speaker fed so it doesn't replay stale DMA. */
             muse_state_set_level(0);
             muse_audio_write(silence, MUSE_AUDIO_CHUNK);
@@ -426,6 +434,9 @@ static bool hatch_reply(bool *delivered)
         /* No speech (TTS unavailable): leave the reply text up for a moment. */
         vTaskDelay(pdMS_TO_TICKS(2500));
     }
+    /* The voice task owns the displayed playback state. A transport's DONE
+     * event need not update it (the official transport only reports events). */
+    muse_state_set_mode(MUSE_MODE_IDLE);
     return false;
 }
 

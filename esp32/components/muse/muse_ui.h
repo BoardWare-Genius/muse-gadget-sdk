@@ -34,6 +34,9 @@ bool muse_ui_dark(void);
 /* From any task: the face tile is the currently visible tile. */
 bool muse_ui_face_active(void);
 
+/* Monotonic UI timer count; readable without taking the display mutex. */
+uint32_t muse_ui_frame_count(void);
+
 /* The functions below run in the LVGL task (or with the display lock held). */
 
 /* Slide back to the face (e.g. when a talk starts). */

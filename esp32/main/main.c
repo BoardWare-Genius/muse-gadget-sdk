@@ -29,6 +29,11 @@
 #endif
 
 void app_main(void) {
+#if CONFIG_MUSE_NANOMUSE
+    extern void nanomuse_start(void);
+    nanomuse_start();
+    return;
+#else
 #if CONFIG_MUSE_POWER_TEST
     /* Opt-in standalone BSP diagnostic: no support-log persistence, normal
      * UI/voice/radio/credential or reconnect initialization may run. */
@@ -60,4 +65,5 @@ void app_main(void) {
     muse_glue_start();
 #endif
     app_run();
+#endif
 }

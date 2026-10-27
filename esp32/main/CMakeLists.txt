@@ -91,7 +91,7 @@ else()
     list(APPEND GADGET_SRCS "led_status.c")
 endif()
 
-if(CONFIG_MUSE_ENABLED)
+if(CONFIG_MUSE_ENABLED AND NOT CONFIG_MUSE_NANOMUSE)
     list(APPEND GADGET_SRCS "muse_glue.c")
 endif()
 
@@ -119,6 +119,11 @@ if(CONFIG_HOMEHUB_VOICE)
     endif()
 endif()
 
+# The local gateway image never links or starts the cloud pairing/OTA stack.
+if(CONFIG_MUSE_NANOMUSE)
+    set(GADGET_SRCS "main.c" "nanomuse_app.c" "wifi_mgr.c")
+endif()
+
 idf_component_register(
     SRCS ${GADGET_SRCS}
     INCLUDE_DIRS "."
@@ -128,7 +133,7 @@ idf_component_register(
 
 # fast_gcm.c takes over ESP-IDF's one-shot AES-GCM entry points (PSA's AES-GCM
 # driver calls them across archives, so the linker can redirect them).
-if(CONFIG_HOMEHUB_FAST_GCM)
+if(CONFIG_HOMEHUB_FAST_GCM AND NOT CONFIG_MUSE_NANOMUSE)
     # -u pulls fast_gcm.o out of libmain: nothing else in main references it,
     # and the references the wrap creates come from later archives.
     target_link_libraries(${COMPONENT_LIB} INTERFACE
@@ -140,7 +145,7 @@ endif()
 
 # ble_coex.c sits between the BLE controller and the coexistence scheduler
 # (both in prebuilt archives, so the linker can redirect the calls).
-if(CONFIG_HOMEHUB_BLE_COEX)
+if(CONFIG_HOMEHUB_BLE_COEX AND NOT CONFIG_MUSE_NANOMUSE)
     target_link_libraries(${COMPONENT_LIB} INTERFACE
         "-Wl,--wrap=coex_schm_status_bit_set"
         "-Wl,--wrap=coex_schm_status_bit_clear"

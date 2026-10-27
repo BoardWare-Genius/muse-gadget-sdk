@@ -42,7 +42,9 @@ if(CONFIG_MUSE_ENABLED)
         "muse_lv_mem.c"
         "muse_link.c"
         "muse_ble.c")
-    if(CONFIG_MUSE_HATCH)
+    if(CONFIG_MUSE_NANOMUSE)
+        list(APPEND srcs "muse_nanomuse.c")
+    elseif(CONFIG_MUSE_HATCH)
         list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
         list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
     else()
@@ -123,7 +125,7 @@ endif()
 
 set(muse_priv_requires
     esp_timer esp_driver_usb_serial_jtag esp_psram nvs_flash esp_pm esp_event esp_netif
-    bt esp-tls mbedtls esp_app_format esp_http_client
+    bt esp-tls mbedtls esp_app_format esp_http_client esp_websocket_client espressif__cjson
     noise_core minimp3
     esp_lcd esp_adc esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_uart esp_wifi
     esp_driver_pcnt)

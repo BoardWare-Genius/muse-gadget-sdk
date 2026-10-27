@@ -1,0 +1,32 @@
+# Copy the speech sections into config.toml; keep your gateway/nanoMuse settings.
+[gateway]
+host = "0.0.0.0"
+port = 8765
+key_env = "CORES3_DEVICE_KEY"
+
+[nanomuse]
+url = "http://127.0.0.1:8787"
+token_env = "NANOMUSE_SERVER_TOKEN"
+turn_timeout = 150
+
+[asr]
+provider = "blackbox"
+url = "http://127.0.0.1:5002/asr-blackbox"
+model = "qwen" # Also supports "sensevoice" and "fun-asr".
+language = "Chinese" # qwen: Chinese; sensevoice: zh/auto; fun-asr: 中文.
+key_env = "ASR_API_KEY"
+
+[tts]
+provider = "blackbox"
+url = "http://127.0.0.1:5050/tts-blackbox"
+model = "voxcpmtts" # Also supports melotts/cosyvoicetts/sovitstts.
+key_env = "TTS_API_KEY"
+# speed = 1.0
+audio_streaming = true # VoxCPM: forward audio before the response completes.
+
+# Optional backend settings. Voice references can remain in TTS Blackbox's
+# .env.yaml. VoxCPM streaming is negotiated for new CoreS3 firmware.
+# [tts.parameters]
+# spk_id = "中文女"             # CosyVoice SFT
+# model = "sft"                # CosyVoice mode (distinct from tts.model)
+# prompt_text = "参考录音原文"   # VoxCPM / zero-shot

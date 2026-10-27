@@ -34,6 +34,9 @@
 #define MUSE_VM_MAX 63
 #define MUSE_TOKEN_MAX 1023
 
+#define MUSE_GATEWAY_URL_MAX 191
+#define MUSE_GATEWAY_KEY_MAX 127
+
 #define MUSE_MIC_GAIN_MAX 36      /* dB; ES7210 PGA, applied in 3 dB steps */
 
 typedef enum {
@@ -45,6 +48,7 @@ typedef enum {
     MUSE_SETTING_WIFI,          /* on/off or credentials */
     MUSE_SETTING_BLE,
     MUSE_SETTING_HATCH,
+    MUSE_SETTING_GATEWAY,
 } muse_setting_t;
 
 typedef void (*muse_setting_cb_t)(muse_setting_t what);
@@ -80,3 +84,9 @@ void muse_settings_set_hatch_host(const char *host);
 void muse_settings_set_hatch_vm(const char *vm);
 /* append=true adds to the stored token (for chunked BLE writes). */
 esp_err_t muse_settings_set_hatch_token(const char *token, bool append);
+
+#if CONFIG_MUSE_NANOMUSE
+void muse_settings_gateway(char url[MUSE_GATEWAY_URL_MAX + 1], char *key);
+esp_err_t muse_settings_set_gateway_url(const char *url);
+esp_err_t muse_settings_set_gateway_key(const char *key);
+#endif
