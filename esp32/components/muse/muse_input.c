@@ -330,7 +330,9 @@ static void check_sleep(void)
     int after = muse_settings_sleep_s();
     float mode_t;
     if (after && !muse_state_asleep() && muse_state_mode(&mode_t) == MUSE_MODE_IDLE
-        && muse_state_idle_secs() > after) {
+        /* Waiting for a reply is not idle time. Give the result/error a full
+         * idle interval on screen, even if the last key press was long ago. */
+        && mode_t > after && muse_state_idle_secs() > after) {
         set_asleep(true, "auto-sleep");
     }
 }

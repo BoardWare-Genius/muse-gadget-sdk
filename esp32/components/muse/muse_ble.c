@@ -100,11 +100,14 @@ static int build_status(char *out, size_t len)
     return snprintf(out, len,
                     "{\"backend\":\"nanomuse\",\"fw\":\"%s\",\"battery\":%d,"
                     "\"build_date\":\"%s\",\"build_time\":\"%s\",\"elf_sha256\":\"%s\","
-                    "\"mode\":%d,\"mode_age_s\":%.0f,\"reply_phase\":%d,\"ui_frames\":%u,"
+                    "\"mode\":%d,\"mode_age_s\":%.0f,\"reply_phase\":%d,\"ui_frames\":%u,\"notifications\":%u,"
+                    "\"image_visible\":%s,\"image_received\":%u,"
                     "\"wifi\":{\"ssid\":\"%s\",\"ip\":\"%s\",\"state\":\"%s\"},"
                     "\"gateway\":{\"url\":\"%s\",\"key\":%s,\"state\":\"%s\"}}",
                     app->version, p.battery_pct, app->date, app->time, sha,
                     (int)mode, (double)mode_age, (int)muse_nanomuse_reply_phase(), (unsigned)muse_ui_frame_count(),
+                    muse_nanomuse_notification_count(),
+                    muse_ui_image_visible() ? "true" : "false", muse_nanomuse_image_bytes(),
                     ssid_e, w.ip, wifi_state_name(w.state),
                     url_e, has_key ? "true" : "false", muse_hatch_state_name(h.state));
 #else

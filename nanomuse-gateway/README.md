@@ -2,7 +2,7 @@
 
 这一配置把 M5Stack CoreS3 当作 nanoMuse 的小终端：屏幕、触摸设置、头像、PWR 录音键继续使用。设备连接电脑上的网关，网关访问本机 nanoMuse。设备不再访问 `api.muse.ai`，不需要 Muse SDK token 或手机配对。
 
-当前完成：USB 文字聊天、屏幕文字回复、16 kHz 单声道录音上传、可选 WAV 保存、可选 ASR 识别与 TTS 播报、取消与断线处理。未配置 ASR 时只检查/保存录音，不会自动识别；未配置 TTS 时只显示文字。USB 文字聊天仍只返回文字，按键录音的回复可以播报。
+当前完成：USB 文字聊天、屏幕文字与图片回复、16 kHz 单声道录音上传、可选 WAV 保存、可选 ASR 识别与 TTS 播报、单次操作审批、后台通知、取消与断线处理。未配置 ASR 时只检查/保存录音，不会自动识别；未配置 TTS 时显示文字和图片。USB 文字聊天不播音频，按键录音的回复可以播报。
 
 ```text
 CoreS3 ──Wi-Fi / WebSocket──> 电脑网关 ──HTTP──> 本机 nanoMuse
@@ -22,7 +22,7 @@ nanomuse serve
 
 通过 Docker 部署时，将容器的 8787 端口发布到主机。其他电脑访问 `http://主机局域网IP:8787/`，不要使用容器内部 IP；例如主机地址为 `192.168.1.10` 时，访问 `http://192.168.1.10:8787/`。
 
-网关适配的是 [nanoMuse 本地 REST API](https://github.com/nano-muse/nanoMuse/blob/4ba855cf1fbed336e02b12566fef19bac5ce65d7/nanomuse/server/api.py)：创建线程、发送文字、读取最终消息、停止运行。按 2026-10-21 的上述源码核对协议；未复制 nanoMuse 的程序代码。每次设备连接创建自己的线程，正常连续聊天保留上下文；取消正在执行的请求后，新请求使用新线程，避免旧结果串入。需要批准操作或补充信息时，请在电脑的 nanoMuse 页面处理，网关不会自动批准。
+网关适配的是 [nanoMuse 本地 REST API](https://github.com/nano-muse/nanoMuse/blob/4ba855cf1fbed336e02b12566fef19bac5ce65d7/nanomuse/server/api.py)：创建线程、发送文字、读取最终消息和追问、停止运行。未复制 nanoMuse 的程序代码。每次设备连接创建自己的线程，正常连续聊天保留上下文；取消正在执行的请求后，新请求使用新线程，避免旧结果串入。新版固件可以处理本次对话的单次操作审批；需要补充信息时，网关把追问作为回复传给设备，下一次文字或录音继续回答这个问题。网关不会自动批准操作。
 
 ## 2. 启动网关
 
@@ -131,12 +131,29 @@ nanoMuse 配置将代码和只读数据保留在 Flash 中，PSRAM 继续用于 
   python3 esp32/tools/muse/chat.py --port /dev/ttyACM0 '你好'
   ```
 
-- **录音**：按住 CoreS3 左侧 PWR 说话，松开上传。录音上限约 15 秒；网络传输在录音结束后进行。没有 ASR 时屏幕会显示“语音识别尚未配置”，开启保存后可在电脑检查 WAV。配置 ASR 和 TTS 后，回复先显示文字，再从扬声器播报；电脑先生成并转换完整音频，设备接收完整后播放，每条最多 60 秒。
+- **录音**：按住 CoreS3 左侧 PWR 说话，松开上传。录音上限约 15 秒；网络传输在录音结束后进行。没有 ASR 时屏幕会显示“语音识别尚未配置”，开启保存后可在电脑检查 WAV。配置 ASR 和 TTS 后，网关分段处理文字并播报；VoxCPM 可边生成边接收音频，每条回复音频最多 60 秒。
+- **补充信息**：nanoMuse 问“你指哪个设备？”等问题时，CoreS3 会显示并播报追问，播完回到待机。再次按住 PWR 回答即可，网关保留原会话，让 nanoMuse 接着处理。等待你回答不会触发网关的模型回复超时；主动取消或设备断线会停止仍在等待的任务，nanoMuse 自身的追问有效期仍然适用。
 - **状态**：`THINKING` 表示等待回答；文字已到而语音仍在生成/接收时显示 `PREPARING AUDIO`；只阅读文字时显示 `REPLY`；实际播放时显示 `SPEAKING`；流式音频停顿超过 1 秒时回到等待状态，新音频到达后恢复 `SPEAKING`。有语音时，收到 `audio_end` 且剩余音频播完后恢复 `READY`，无需额外等待 `done` 消息。设备若还有积压录音，会自动发送下一条，再次进入等待状态，串口有 `sending a saved note` 日志。
 - **取消**：回复等待中再次按 PWR 可以打断并开始录音；串口 `>chat.cancel` 取消文字请求。取消会请求 nanoMuse 停止当前线程，不会撤销已经执行的外部操作。
+- **操作确认**：当前对话需要授权时，屏幕显示可上下滚动的审批卡，包含工具、风险、摘要、目标、原因和服务端提供的参数预览。查看后点击 **允许一次** 或 **拒绝**，nanoMuse 收到决定后继续处理。只授权当前操作，不设置永久权限；超长详情或不支持单次授权的操作只能在设备上拒绝，允许操作需到网页查看处理。
+- **审批失效**：在网页处理、取消当前请求、断线或回复结束时，设备审批卡会关闭。重复点击和旧卡片不能授权后续操作。网络发送失败时可重试；等待审批最多额外延长模型等待时间 120 秒。设备仅处理本次设备对话中的前台审批，不接收其他设备、其他会话或后台任务的审批。
+- **后台通知**：待机屏幕右上角出现 **通知 N**，点击后可上下滚动查看摘要，用 **上一条 / 下一条** 翻页，**已读** 关闭当前通知，**稍后** 返回待机并保留未读。后台任务结果、失败、新文件以及待审批/待补充信息会进入通知。通知到达会唤醒屏幕，不会自动播报，也不会覆盖录音、思考、播放和当前审批界面；对话结束后可查看。
+- **通知范围与保存**：网关默认每 5 秒读取同一 nanoMuse 账户的 Feed，跳过静默结果和仍在运行的过程文字。首次启用不推送历史完成结果；后续断线或重启会恢复未读，并从最近 60 条 Feed 补取新消息。最多保留最新 **6 条**，超出范围和完整内容在网页查看。后台审批/追问只作提醒，需在网页处理；点击“已读”不会批准或回答任务。共用设备密钥的设备共用通知已读状态，仅影响本网关，不修改网页的任务状态。
 - **错误排查**：Wi-Fi 页无 IP，先解决联网；网关不能 Connected，检查电脑 IP、设备密钥、TCP 8765 与网络隔离；Connected 但文字报错，检查 nanoMuse 是否运行、server token 及电脑上的模型配置。
 
-目前的验证覆盖软件协议与模拟服务，不包含真实开发板的烧录、录音音质或真实模型调用。
+后台通知需要更新网关并重新烧录固件，无需增加服务或密钥。现有 `config.toml` 未写 `[notifications]` 时也默认开启；可添加以下配置调整或关闭：
+
+```toml
+[notifications]
+enabled = true
+poll_interval = 5
+state_file = ".state/notifications.json"
+```
+
+通知缓存只保存在电脑，文件权限为 `0600`，`.state/` 已忽略；其中包含消息摘要，不要提交或分享。网关的 nanoMuse URL/token 改变时，旧缓存不会发给新账户。
+USB `>status` 返回的 `device.notifications` 是设备收到的未读数，可用于检查网关到设备的通知连接。
+
+审批验证使用模拟工具，不执行真实的发送、删除或付款操作；真实模型行为和录音音质需要在你的服务配置下确认。
 
 ## 5. 配置 ASR 和 TTS
 
@@ -237,9 +254,27 @@ esp32/tools/nanomuse.sh -p /dev/ttyACM0 flash monitor
 
 使用前先确认电脑 nanoMuse 页面能正常文字聊天；语音接口不会修复 nanoMuse 的 server token 或模型配置。接通后按住 PWR 说话，松开即可执行“录音 → ASR → nanoMuse → 屏幕文字 → TTS 播报”；播报中再次按 PWR 会停止上一轮并开始新录音。屏幕字幕按播放进度粗略分页，不含逐字时间戳。
 
+## 图片展示
+
+更新网关依赖（`cd nanomuse-gateway && uv sync --locked`），并重新构建、烧录固件。现有 `config.toml` 无需增加配置，默认启用；需要关闭可添加 `[images]`、`enabled = false`。
+
+当本次对话生成或更新工作区中的图片时，网关取最后一张生成缩略预览；回复中的本地 Markdown 图片链接也可显示。例如对 CoreS3 说：
+
+> 请生成一张小猫图片，保存为工作区中的 PNG 文件，并在回复中附上这张图片。
+
+生成图片本身依赖 nanoMuse 已配置的图片模型或绘图工具。若工作区已有图片，可以说：
+
+> 请展示工作区的 pictures/demo.png，用 Markdown 图片链接回复：![预览](/api/files/pictures/demo.png)。
+
+图片下载和解码在电脑端进行，保持比例、黑边补齐到 CoreS3 的 320×240 屏幕。设备收到完整图片后，等语音和字幕结束再全屏展示；点击图片关闭，按住 PWR 开始下一次录音也会退出。阅读设置、审批或通知时延后展示。图片处理在回复完成后进行，不等待图片才发送文字或启动语音。图片失败会输出 warning，保留文字和语音。
+
+支持 PNG、JPEG（含 EXIF 方向）、WebP 和 GIF 首帧；透明部分显示黑色。当前每次回复预览最后一张，尚无相册、缩放、网页截图或后台通知图片预览。源文件限 8 MiB、解码尺寸限 4,194,304 像素；SVG 和外部网址不直接下载，可先让 nanoMuse 将图片保存到工作区。网关只读取 nanoMuse 的 `/api/files/`，不跟随下载重定向；server token 始终留在电脑。旧固件不声明图片能力时不会收到图片数据。
+
+USB `>status` 的 `device.image_visible` 表示图片是否正在显示，`image_received` 表示尚未展示的图片已接收字节。取消、换轮次、断线或图片不完整时，丢弃未展示的图片。
+
 ## 协议和验证
 
-`GET /device` 升级 WebSocket，用 `Authorization: Bearer <设备密钥>` 认证。网关先发送 `{"type":"hello","protocol":1}`。控制消息含非零 uint32 `id`：
+`GET /device` 升级 WebSocket，用 `Authorization: Bearer <设备密钥>` 认证。网关先发送 `{"type":"hello","protocol":1}`，支持通知时增加 `notifications:true`。对话控制消息含非零 uint32 `id`；连接级通知消息不含对话 ID：
 
 | 方向 | 消息 |
 | --- | --- |
@@ -247,10 +282,19 @@ esp32/tools/nanomuse.sh -p /dev/ttyACM0 flash monitor
 | 设备 → 网关 | `begin` + `rate:16000, channels:1, format:"s16le"`；新固件加 `tts:true` 请求播报 |
 | 设备 → 网关 | binary：4 字节 little-endian ID + 最多 2048 字节 PCM |
 | 设备 → 网关 | `end` 或 `cancel` |
+| 设备 → 网关 | `subscribe` + `notifications:true` 订阅后台通知；`notification_read` + 随机 `token` 标记已读（不含 `id`） |
+| 网关 → 设备 | `notifications` + `items` 全量未读快照，每项含 `token`、`kind`、`title`、`text`（不含 `id`，最多 6 项） |
+| 设备 → 网关 | `text`/`begin` 加 `approvals:true` 启用设备审批；`approval_decision` 含当前 `id`、卡片 `token` 和布尔值 `approved` |
 | 网关 → 设备 | `heard`, `sent`, `reply`, `warning`, `done`, `error`；文字在 `text` |
+| 网关 → 设备 | 有真实新进展时发送 `progress` + 当前 `id` 和递增 uint32 `seq`，不改变字幕或播放状态；重复或旧轮次进度不续期 |
+| 网关 → 设备 | `approval` 含当前 `id`、随机 `token`、详情 `text`、`can_approve`；`approval_closed` 关闭对应卡片 |
 | 网关 → 设备 | 可选 `audio` + `rate:16000, channels:1, format:"s16le", frames:N`，随后 binary（4 字节 little-endian ID + 最多 2048 字节 PCM）和 `audio_end` |
+| 设备 → 网关 | `text`/`begin` 加 `images:{"width":320,"height":240}` 声明图片能力和实际屏幕尺寸 |
+| 网关 → 设备 | 回复 `done` 后，可选 `image` + 当前 `id`、`width`、`height`、`format:"rgb565be"`、`bytes`，然后图片 binary 和 `image_end` |
 
-一次连接上的 ID 不重用。旧 ID 的文字和音频在设备端丢弃；超大录音、消息和上传等待均有上限。网关最多同时接入 4 台设备，每台独立线程；回复显示和合成输入限制为 6000 UTF-8 字节，截断时提示在电脑查看全文。网关模型超时默认 150 秒，流式 TTS 每段总超时 75 秒，固件等待上限 360 秒。播放缓冲在 PSRAM 分配，最多约 1.92 MB；流式回复边接收边播放，终止事件等待音频读完。
+图片 binary 头为 4 字节零值、ASCII `IMG1`、4 字节 little-endian 对话 ID、4 字节 little-endian 字节偏移，随后最多 2048 字节 RGB565（高字节在前）。零 ID 保留用于区分图片与 PCM。设备按偏移顺序收齐并收到 `image_end` 后才允许显示；图片传输总期限 15 秒。图片可以在 `audio_end`/`done` 后到达，但对话 ID 必须仍是最近提交的有效轮次。屏幕尺寸必须是整数、单边不超过 640、总像素不超过 153600。
+
+一次连接上的 ID 不重用。旧 ID 的文字和音频在设备端丢弃；超大录音、消息和上传等待均有上限。网关最多同时接入 4 台设备，每台独立线程；回复显示和合成输入限制为 6000 UTF-8 字节，截断时提示在电脑查看全文。网关模型无新进展超时默认 150 秒（`nanomuse.turn_timeout`），整轮最长 900 秒（`nanomuse.max_turn_timeout`，含 ASR、模型及排队的 TTS）。新文字、工具状态或输出变化会刷新无进展计时；重复轮询、时间戳更新和其他会话/后台事件不会续期。新网关最多每 2 秒按真实进展发送 `progress`，CoreS3 收到有效进度序号、新文字或 PCM 后刷新等待；设备无进展上限为 180 秒，审批卡等待另有最多 120 秒余量，整轮上限 1200 秒。流式 TTS 每段总超时仍为 75 秒。播放缓冲在 PSRAM 分配，最多约 1.92 MB；流式回复边接收边播放，终止事件等待音频读完。
 
 ```bash
 uv run --project nanomuse-gateway --locked python -m unittest discover -s nanomuse-gateway/tests -v
@@ -270,3 +314,7 @@ python3 -m unittest discover -s esp32/tests -p 'test_*.py'
 CoreS3 画面冻结诊断：本地配置使用 LVGL 单线程同步绘制，避开异步 `swdraw` 完成等待。USB `>status` 的 `device.ui_frames` 应持续增长；若语音正常但该值不变，表示显示任务停止推进。该配置需要重新烧录固件。
 
 字幕容量协商需要同时更新网关和固件。每个 TTS 短句都有对应的采样位置字幕标记；长句会拆成单屏可显示的小段，避免长字幕被省略或超长标记被设备忽略。
+
+长回答超时修复需要同时重启网关并重新烧录 CoreS3；只更新网关时，旧固件仍受原来的 360 秒总等待限制。语音的 60 秒容量限制独立于超时：达到该限制会提示 warning 并保留文字，不会扩大发送/播放缓冲。日志中的 `model_idle_timeout`、`turn_deadline` 和 `tts_failed` 分别指模型无进展、整轮达到上限和 TTS 失败；`progress` 不代表增加模型生成速度。
+
+自动休眠同时要求设备持续处于 IDLE、且没有按键/触摸，均超过设置的休眠时长。等待回答和播报的时间不计入这段空闲；成功结束或超时回到 IDLE 后重新计算，避免错误提示刚出现就熄屏。设置里的自动休眠时长保持有效。

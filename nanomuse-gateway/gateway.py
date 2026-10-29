@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from pathlib import Path
 import shutil
 import struct
@@ -25,6 +26,8 @@ from urllib.parse import quote
 import wave
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, FormData, WSMsgType, web
+from notifications import NotificationInbox
+from images import IMAGE_MAGIC, ImageBridge, display_size, image_paths
 
 LOG = logging.getLogger("gateway.latency")
 
@@ -36,20 +39,91 @@ MAX_JSON = 8192
 UPLOAD_TIMEOUT = 30
 MAX_SPEECH = RATE * 2 * 60
 MAX_TTS_WAV = 24_000_000
+MAX_APPROVAL_TEXT = 4096
+PROGRESS_INTERVAL = 2.0
+
+
+class ReplyProgress:
+    """Only new model/tool activity renews the idle deadline; polling cannot."""
+    def __init__(self, idle_timeout, max_timeout):
+        now = time.monotonic()
+        self.idle_timeout = idle_timeout
+        self.idle_deadline = now + idle_timeout
+        self.deadline = now + max_timeout
+        self.last_report = now
+        self.dirty = False
+        self.fingerprint = None
+
+    def touch(self):
+        self.idle_deadline = time.monotonic() + self.idle_timeout
+        self.dirty = True
+
+    def observe(self, events):
+        # Timestamps/status heartbeats alone do not count as progress. Keep
+        # content private: only a digest, never model/tool text in logs.
+        fields = ("id", "type", "text", "reasoning", "final", "status", "output", "path", "action")
+        meaningful = [{k: e[k] for k in fields if k in e} for e in events
+                      if e.get("type") in ("assistant", "tool", "approval", "question", "artifact", "error")]
+        fingerprint = hashlib.sha256(json.dumps(meaningful, sort_keys=True).encode()).digest()
+        if meaningful and fingerprint != self.fingerprint:
+            self.touch()
+        self.fingerprint = fingerprint
+
+    async def report(self, send):
+        now = time.monotonic()
+        if self.dirty and now - self.last_report >= PROGRESS_INTERVAL:
+            await send("progress")
+            self.last_report = now
+            self.dirty = False
+
+    def expired(self):
+        now = time.monotonic()
+        return now >= self.deadline or now >= self.idle_deadline
 
 
 class TurnError(Exception):
     """An intentionally public error, safe to send to the board."""
 
 
-async def read_object(response, limit: int) -> dict:
+class UpstreamHTTPError(TurnError):
+    def __init__(self, status: int):
+        self.status = status
+        super().__init__(f"nanoMuse 请求失败 (HTTP {status})")
+
+
+def approval_details(event: dict) -> tuple[str, bool]:
+    """Use the server's approval preview, with no silent truncation of consent."""
+    parts = ["仅允许本次操作", f"工具：{event.get('tool', '')}",
+             f"风险：{event.get('risk', '')}", str(event.get("summary", ""))]
+    for key, label in (("purpose", "目的"), ("target", "目标"), ("egress_target", "网络目标")):
+        if event.get(key):
+            parts.append(f"{label}：{event[key]}")
+    for key, label in (("reasons", "原因"), ("warnings", "警告")):
+        if isinstance(event.get(key), list):
+            parts.extend(f"{label}：{value}" for value in event[key])
+    if event.get("args"):
+        parts.append("参数预览：\n" + json.dumps(event["args"], ensure_ascii=False, indent=2))
+    text = "\n".join(parts)
+    options = event.get("grant_options", ["once"])
+    allowed = isinstance(options, list) and "once" in options
+    if (len(text.encode()) > MAX_APPROVAL_TEXT
+            or len(json.dumps({"text": text}, ensure_ascii=False).encode()) > MAX_JSON - 512):
+        return "操作详情过长，请在 nanoMuse 网页查看完整内容后处理。\n此处只能拒绝。", False
+    if not allowed:
+        text = "此操作不能单次授权，请在 nanoMuse 网页处理。\n" + text
+    if len(text.encode()) > MAX_APPROVAL_TEXT:
+        return "请在 nanoMuse 网页查看完整操作详情。此处只能拒绝。", False
+    return text, allowed
+
+
+async def read_object(response, limit: int, response_type=dict):
     raw = bytearray()
     async for chunk in response.content.iter_chunked(16384):
         raw.extend(chunk)
         if len(raw) > limit:
             raise TurnError("服务返回内容过大")
     value = json.loads(raw)
-    if not isinstance(value, dict):
+    if not isinstance(value, response_type):
         raise TurnError("服务返回了无效的 JSON 对象")
     return value
 
@@ -117,9 +191,12 @@ class NanoMuse:
         self.base = config.get("url", "http://127.0.0.1:8787").rstrip("/")
         self.token = os.environ.get(config.get("token_env", "NANOMUSE_SERVER_TOKEN"), "")
         self.timeout = float(config.get("turn_timeout", 150))
+        self.max_timeout = float(config.get("max_turn_timeout", 900))
+        if not 0 < self.timeout <= 900 or not 0 < self.max_timeout <= 900:
+            raise ValueError("nanomuse timeouts must be greater than 0 and at most 900 seconds")
         self.poll_interval = float(config.get("poll_interval", 0.4))
 
-    async def request(self, method: str, path: str, **kwargs):
+    async def request(self, method: str, path: str, response_type=dict, **kwargs):
         if not self.token:
             raise TurnError("电脑端尚未配置 NANOMUSE_SERVER_TOKEN")
         try:
@@ -131,8 +208,8 @@ class NanoMuse:
                 if response.status in (401, 403):
                     raise TurnError("nanoMuse 认证失败，请检查电脑端 server token")
                 if response.status >= 400:
-                    raise TurnError(f"nanoMuse 请求失败 (HTTP {response.status})")
-                return await read_object(response, 2_000_000)
+                    raise UpstreamHTTPError(response.status)
+                return await read_object(response, 2_000_000, response_type)
         except (ClientError, OSError, asyncio.TimeoutError, ValueError) as exc:
             raise TurnError("电脑无法连接 nanoMuse 本地服务") from exc
 
@@ -147,10 +224,12 @@ class NanoMuse:
         with contextlib.suppress(TurnError):
             await self.request("POST", f"/api/threads/{quote(thread, safe='')}/stop")
 
-    async def reply(self, thread: str, text: str, send, on_delta=None) -> str:
+    async def reply(self, thread: str, text: str, send, on_delta=None, on_approvals=None,
+                    on_question=None, on_images=None, _progress=None) -> str:
         # Subscribe before sending so even the first tokens cannot be missed.
         # Older nanoMuse servers without /ws retain the REST final-reply path.
-        if on_delta is not None:
+        if _progress is None:
+            progress = ReplyProgress(self.timeout, self.max_timeout)
             live = None
             try:
                 live = await asyncio.wait_for(
@@ -166,7 +245,8 @@ class NanoMuse:
             except (ClientError, OSError, ValueError, TypeError, asyncio.TimeoutError):
                 if live is not None:
                     await live.close()
-                return await self.reply(thread, text, send)
+                return await self.reply(thread, text, send, on_approvals=on_approvals,
+                                        on_question=on_question, on_images=on_images, _progress=progress)
 
             async def consume():
                 async for message in live:
@@ -175,12 +255,15 @@ class NanoMuse:
                     data = json.loads(message.data)
                     if isinstance(data, dict) and data.get("kind") == "delta" and data.get("thread") == thread:
                         delta = data.get("text")
-                        if isinstance(delta, str):
-                            await on_delta(delta)
+                        if isinstance(delta, str) and delta:
+                            progress.touch()
+                            if on_delta is not None:
+                                await on_delta(delta)
 
             reader = asyncio.create_task(consume())
             try:
-                return await self.reply(thread, text, send)
+                return await self.reply(thread, text, send, on_approvals=on_approvals,
+                                        on_question=on_question, on_images=on_images, _progress=progress)
             finally:
                 reader.cancel()
                 with contextlib.suppress(asyncio.CancelledError, ValueError, ClientError):
@@ -194,8 +277,9 @@ class NanoMuse:
         if not isinstance(anchor, str) or not anchor:
             raise TurnError("nanoMuse 未返回消息 ID")
         await send("sent")
-        deadline = time.monotonic() + self.timeout
-        while time.monotonic() < deadline:
+        progress = _progress
+        last_poll, waiting, approval_budget = time.monotonic(), False, 120.0
+        while not progress.expired():
             result = await self.request("GET", path + "/events", params={"limit": "1000"})
             events = result.get("events")
             if not isinstance(events, list) or any(not isinstance(event, dict) for event in events):
@@ -203,24 +287,61 @@ class NanoMuse:
             start = next((n for n, event in enumerate(events) if event.get("id") == anchor), None)
             if start is None:
                 raise TurnError("nanoMuse 会话已改变，请重新发送")
+            now = time.monotonic()
+            if waiting:
+                extension = min(now - last_poll, approval_budget)
+                progress.idle_deadline += extension
+                approval_budget -= extension
+            last_poll = now
+            foreground = [event for event in events[start + 1:]
+                          if event.get("thread", thread) == thread and event.get("source") != "background"]
+            progress.observe(foreground)
+            await progress.report(send)
+            if on_approvals is not None:
+                waiting = await on_approvals([
+                    event for event in events[start + 1:]
+                    if event.get("thread", thread) == thread
+                    and event.get("type") == "approval" and event.get("status") == "pending"
+                    and event.get("source") != "background"
+                ])
             for event in events[start + 1 :]:
-                if event.get("thread", thread) != thread:
+                if event.get("thread", thread) != thread or event.get("source") == "background":
                     continue
+                # ask_user suspends the upstream run rather than creating a final
+                # assistant bubble. Deliver the question as this device reply;
+                # its next utterance answers the pending question in the same thread.
+                if (event.get("type") == "question" and event.get("status") == "pending"
+                        and not waiting):
+                    question = event.get("text")
+                    if isinstance(question, str) and question.strip():
+                        if on_question is not None:
+                            await on_question()
+                        return question
                 if (event.get("type") == "assistant" and event.get("final") is True
                         and not event.get("quiet") and event.get("source") != "background"):
                     answer = event.get("text")
                     if isinstance(answer, str) and answer.strip():
+                        if on_images is not None:
+                            on_images(image_paths([
+                                e for e in events[start + 1:]
+                                if e.get("thread", thread) == thread and e.get("source") != "background"
+                            ], answer))
                         return answer
                 if event.get("type") == "error":
                     raise TurnError("nanoMuse 处理失败，请在电脑查看详情")
             await asyncio.sleep(self.poll_interval)
-        raise TurnError("nanoMuse 回复超时；如需确认或补充信息，请在电脑处理")
+        reason = "model_deadline" if time.monotonic() >= progress.deadline else "model_idle_timeout"
+        LOG.warning("reason=%s", reason)
+        raise TurnError("nanoMuse 回复超时（达到整轮最长时限）" if reason == "model_deadline"
+                        else "nanoMuse 回复超时（持续无新文字或任务进展）；请稍后重试或在网页查看")
 
 
 class Session:
     def __init__(self, ws: web.WebSocketResponse, app: web.Application):
         self.ws, self.config = ws, app[CONFIG]
         self.nano = app[NANO]
+        self.app_images = app[IMAGES]
+        self.inbox = app[INBOX]
         self.http = app[HTTP]
         self.id: int | None = None
         self.pcm: bytearray | None = None
@@ -230,9 +351,117 @@ class Session:
         self.used_ids: set[int] = set()
         self.want_audio = False
         self.streaming_audio = False
+        self.approval_capable = False
+        self.pending_approval: dict | None = None
+        self.handled_approvals: set[str] = set()
+        self.awaiting_answer = False
+        self.notification_version = -1
+        self.notification_tokens: set[str] = set()
+        self.image_size = None
+        self.image_paths: list[str] = []
+        self.reply_complete = False
+        self.progress_seq = 0
+
+    def collect_images(self, paths):
+        self.image_paths = paths
+
+    async def show_image(self, turn_id):
+        if not self.image_size or not self.image_paths or not self.app_images.enabled:
+            return
+        # One preview per reply: the latest image artifact/link. No extra model calls.
+        try:
+            pixels = await self.app_images.fetch(self.image_paths[-1], self.image_size)
+        except (ClientError, OSError, ValueError, asyncio.TimeoutError):
+            LOG.warning("turn=%s image preview unavailable", turn_id)
+            await self.send("warning", "图片预览失败，文字和语音仍可使用；请在网页查看图片", turn_id)
+            return
+        w, h = self.image_size
+        await self.ws.send_json({"type": "image", "id": turn_id, "width": w, "height": h,
+                                 "format": "rgb565be", "bytes": len(pixels)})
+        for offset in range(0, len(pixels), 2048):
+            await self.ws.send_bytes(IMAGE_MAGIC + struct.pack("<II", turn_id, offset)
+                                     + pixels[offset:offset + 2048])
+        await self.send("image_end", turn_id=turn_id)
+
+    async def question_ready(self):
+        self.awaiting_answer = True
+        await self.clear_approval()
+
+    async def approval_card(self, pending: dict, error: str = ""):
+        await self.ws.send_json({"type": "approval", "id": self.id, "token": pending["token"],
+                                 "text": pending["text"], "can_approve": pending["can_approve"],
+                                 "error": error})
+
+    async def clear_approval(self, text: str = ""):
+        pending, self.pending_approval = self.pending_approval, None
+        if pending is not None and not self.ws.closed:
+            await self.ws.send_json({"type": "approval_closed", "id": self.id,
+                                     "token": pending["token"], "text": text})
+
+    async def sync_approvals(self, events: list[dict]) -> bool:
+        if not self.approval_capable:
+            return False
+        candidates = {event["id"]: event for event in events
+                      if isinstance(event.get("id"), str) and 0 < len(event["id"]) <= 256
+                      and event["id"] not in self.handled_approvals}
+        pending = self.pending_approval
+        if pending is not None and pending["event_id"] not in candidates:
+            await self.clear_approval("此请求已处理或已失效")
+        if self.pending_approval is None and candidates:
+            event_id, event = next(iter(candidates.items()))
+            text, allowed = approval_details(event)
+            self.pending_approval = {"event_id": event_id, "token": secrets.token_hex(16),
+                                     "text": text, "can_approve": allowed, "deciding": False}
+            await self.approval_card(self.pending_approval)
+        return self.pending_approval is not None
+
+    async def decide_approval(self, data: dict):
+        pending = self.pending_approval
+        approved = data.get("approved")
+        if (pending is None or self.task is None or self.task.done() or pending["deciding"]
+                or data.get("id") != self.id or data.get("token") != pending["token"]
+                or type(approved) is not bool):
+            return  # No authority over another turn, device, or undisplayed card.
+        if approved and not pending["can_approve"]:
+            await self.approval_card(pending, "请在网页查看完整详情后处理")
+            return
+        pending["deciding"] = True
+        try:
+            # Recheck ownership and liveness in the thread before posting a decision.
+            path = f"/api/threads/{quote(self.thread, safe='')}/events"
+            result = await self.nano.request("GET", path, params={"limit": "1000"})
+            if self.pending_approval is not pending or self.task is None or self.task.done():
+                return
+            live = next((event for event in result.get("events", [])
+                         if event.get("id") == pending["event_id"]
+                         and event.get("thread", self.thread) == self.thread
+                         and event.get("type") == "approval" and event.get("status") == "pending"
+                         and event.get("source") != "background"), None)
+            if live is None:
+                await self.clear_approval("此请求已处理或已失效")
+                return
+            if approval_details(live) != (pending["text"], pending["can_approve"]):
+                await self.clear_approval("操作详情已改变，请重新查看")
+                return
+            await self.nano.request("POST", f"/api/approvals/{quote(pending['event_id'], safe='')}",
+                                    json={"approved": approved, "scope": "once"})
+            self.handled_approvals.add(pending["event_id"])
+            if self.pending_approval is pending:
+                await self.clear_approval("已允许一次" if approved else "已拒绝")
+        except TurnError as exc:
+            if self.pending_approval is pending:
+                if isinstance(exc, UpstreamHTTPError) and exc.status == 404:
+                    await self.clear_approval("此请求已处理或已失效")
+                else:
+                    await self.approval_card(pending, "发送失败，请重试或在网页查看")
+        finally:
+            pending["deciding"] = False
 
     async def send(self, kind: str, text: str | None = None, turn_id: int | None = None):
         message = {"type": kind, "id": turn_id if turn_id is not None else self.id}
+        if kind == "progress":
+            self.progress_seq += 1
+            message["seq"] = self.progress_seq
         if text is not None:
             message["text"] = trim_utf8(text)
         wire = json.dumps(message, ensure_ascii=False)
@@ -245,17 +474,23 @@ class Session:
             wire = json.dumps(message, ensure_ascii=False)
         await self.ws.send_str(wire)
 
-    async def cancel(self):
+    async def cancel(self, preserve_question=False):
+        await self.clear_approval()
+        self.handled_approvals.clear()
         self.pcm = None
         task, self.task = self.task, None
-        if task and not task.done():
+        active = task is not None and not task.done()
+        keep_question = preserve_question and self.awaiting_answer
+        if active:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, ClientError, ConnectionError):
                 await task
+        if ((active and not self.reply_complete) or self.awaiting_answer) and not keep_question:
             if self.thread:
                 await self.nano.stop(self.thread)
             # A cancelled generation cannot append a late answer to the next turn.
             self.thread = None
+        self.awaiting_answer = keep_question
         self.id = None
 
     async def transcribe(self, audio: bytes) -> str | None:
@@ -573,13 +808,16 @@ class Session:
                             sent_bytes += len(audio)
                 except (TurnError, OSError, asyncio.TimeoutError) as exc:
                     failed = True
+                    LOG.warning("turn=%s reason=tts_failed", turn_id)
                     warning = str(exc) if isinstance(exc, TurnError) else "音频转换失败，文字回复仍可阅读"
                     await self.send("warning", warning, turn_id)
 
         worker = asyncio.create_task(speaker())
         flusher = asyncio.create_task(timer())
         try:
-            answer = await self.nano.reply(self.thread, text, self.send, on_delta=delta)
+            answer = await self.nano.reply(self.thread, text, self.send, on_delta=delta,
+                                           on_approvals=self.sync_approvals,
+                                           on_question=self.question_ready, on_images=self.collect_images)
             LOG.info("turn=%s final_text=%.3fs", turn_id, time.monotonic() - turn_at)
             flusher.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -634,6 +872,22 @@ class Session:
 
     async def run_turn(self, turn_id: int, text: str | None, pcm: bytes | None):
         try:
+            # Includes ASR, model work, queued TTS and image delivery; activity
+            # cannot keep a broken turn alive forever.
+            async with asyncio.timeout(self.nano.max_timeout):
+                await self._run_turn(turn_id, text, pcm)
+        except asyncio.TimeoutError:
+            if self.reply_complete:
+                LOG.warning("turn=%s reason=image_deadline", turn_id)
+                return  # A best-effort preview cannot invalidate a delivered reply.
+            LOG.warning("turn=%s reason=turn_deadline", turn_id)
+            await self.send("error", "本次处理超时（达到整轮最长时限）；请缩短任务或在网页继续", turn_id)
+            if self.thread and not self.awaiting_answer:
+                await self.nano.stop(self.thread)
+                self.thread = None
+
+    async def _run_turn(self, turn_id: int, text: str | None, pcm: bytes | None):
+        try:
             if pcm is not None:
                 audio = wav_bytes(pcm)
                 self.save_recording(audio, turn_id)
@@ -649,25 +903,31 @@ class Session:
                 await self.send("heard", text)
             if self.thread is None:
                 self.thread = await self.nano.create_thread()
+            self.awaiting_answer = False
             if pcm is not None and self.want_audio and self.streaming_audio:
                 await self.streaming_reply(text, turn_id)
             else:
-                answer = await self.nano.reply(self.thread, text, self.send)
+                answer = await self.nano.reply(self.thread, text, self.send, on_approvals=self.sync_approvals,
+                                               on_question=self.question_ready, on_images=self.collect_images)
                 await self.send("reply", answer)
                 if pcm is not None and self.want_audio:
                     await self.speak(answer, turn_id)
+            self.reply_complete = True
             await self.send("done")
             LOG.info("turn=%s done", turn_id)
+            await self.show_image(turn_id)
         except TurnError as exc:
             await self.send("error", str(exc))
-            if self.thread:
+            if self.thread and not self.awaiting_answer:
                 await self.nano.stop(self.thread)
                 self.thread = None
         except (OSError, ValueError, TypeError, KeyError):
             await self.send("error", "网关处理失败，请检查本地配置及录音目录")
-            if self.thread:
+            if self.thread and not self.awaiting_answer:
                 await self.nano.stop(self.thread)
                 self.thread = None
+        finally:
+            await self.clear_approval()
 
     async def message(self, message):
         if message.type == WSMsgType.BINARY:
@@ -694,8 +954,22 @@ class Session:
         if not isinstance(data, dict):
             raise TurnError("消息必须是 JSON 对象")
         kind, turn_id = data.get("type"), data.get("id")
+        if kind == "subscribe":
+            if data.get("notifications") is True:
+                self.inbox.subscribe(self)
+                await self.inbox.publish()
+            return
+        if kind == "notification_read":
+            try:
+                await self.inbox.read(self, data.get("token"))
+            except OSError:
+                LOG.warning("Notification read receipt could not be saved")
+            return
         if not valid_id(turn_id):
             raise TurnError("无效的请求 ID")
+        if kind == "approval_decision":
+            await self.decide_approval(data)
+            return
         if kind == "cancel":
             if turn_id == self.id:
                 await self.cancel()
@@ -719,8 +993,13 @@ class Session:
                 raise TurnError("文字为空或超过 4000 字节")
         elif (data.get("rate"), data.get("channels"), data.get("format")) != (RATE, 1, "s16le"):
             raise TurnError("只支持 16 kHz 单声道 s16le")
-        await self.cancel()
+        await self.cancel(preserve_question=True)
         self.id = turn_id
+        self.approval_capable = data.get("approvals") is True
+        self.image_size = display_size(data.get("images"))
+        self.image_paths = []
+        self.reply_complete = False
+        self.progress_seq = 0
         self.used_ids.add(turn_id)
         if kind == "begin":
             self.want_audio = data.get("tts") is True
@@ -732,6 +1011,9 @@ class Session:
 
     async def loop(self):
         await self.ws.send_json({"type": "hello", "protocol": 1, "audio": "s16le/16000/mono",
+                                 "approvals": True,
+                                 "images": self.app_images.enabled,
+                                 "notifications": self.inbox.enabled,
                                  "tts": bool(self.config.get("tts", {}).get("url"))})
         try:
             while not self.ws.closed:
@@ -750,12 +1032,15 @@ class Session:
                     await self.send("error", str(exc))
                     await self.cancel()
         finally:
+            self.inbox.sessions.discard(self)
             await self.cancel()
 
 
 CONFIG = web.AppKey("config", dict)
 HTTP = web.AppKey("http", ClientSession)
 NANO = web.AppKey("nano", NanoMuse)
+INBOX = web.AppKey("inbox", NotificationInbox)
+IMAGES = web.AppKey("images", ImageBridge)
 CONNECTIONS = web.AppKey("connections", set)
 
 
@@ -776,8 +1061,16 @@ def create_app(config: dict) -> web.Application:
     async def start(app):
         app[HTTP] = ClientSession()
         app[NANO] = NanoMuse(app[HTTP], config.get("nanomuse", {}))
-        yield
-        await app[HTTP].close()
+        app[IMAGES] = ImageBridge(app[NANO], config.get("images", {}))
+        app[INBOX] = NotificationInbox(app[NANO], config.get("notifications", {}), TurnError)
+        poller = asyncio.create_task(app[INBOX].run())
+        try:
+            yield
+        finally:
+            poller.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poller
+            await app[HTTP].close()
     app.cleanup_ctx.append(start)
     app[CONNECTIONS] = set()
 

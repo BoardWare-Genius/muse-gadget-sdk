@@ -7,7 +7,16 @@ key_env = "CORES3_DEVICE_KEY"
 [nanomuse]
 url = "http://127.0.0.1:8787"
 token_env = "NANOMUSE_SERVER_TOKEN"
-turn_timeout = 150
+turn_timeout = 150 # Idle seconds without new model text/tool progress.
+max_turn_timeout = 900 # Hard limit for the whole turn, including ASR/TTS.
+
+[notifications]
+enabled = true
+poll_interval = 5
+state_file = ".state/notifications.json"
+
+[images]
+enabled = true # Latest workspace image per reply; PC resizes to the device screen.
 
 [asr]
 provider = "blackbox"

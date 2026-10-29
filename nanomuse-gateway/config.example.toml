@@ -9,7 +9,16 @@ recordings_keep = 20
 [nanomuse]
 url = "http://127.0.0.1:8787"
 token_env = "NANOMUSE_SERVER_TOKEN"
-turn_timeout = 150
+turn_timeout = 150 # Idle seconds without new model text/tool progress.
+max_turn_timeout = 900 # Hard limit for the whole turn, including ASR/TTS.
+
+[notifications]
+enabled = true
+poll_interval = 5 # Seconds; independent of foreground voice/text requests.
+state_file = ".state/notifications.json" # Local unread/dedup state, not committed.
+
+[images]
+enabled = true # Latest workspace image per reply; PC resizes to the device screen.
 
 # Optional multipart transcription endpoint, returning {"text":"..."}.
 # Model keys stay in this process, never on the CoreS3.

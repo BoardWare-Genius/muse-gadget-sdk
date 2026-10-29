@@ -1061,6 +1061,11 @@ static void image_sync(void)
     xSemaphoreGive(s_image_mutex);
 }
 
+bool muse_ui_image_visible(void)
+{
+    return s_image_dsc.data != NULL;
+}
+
 static void on_image_clicked(lv_event_t *e)
 {
     (void)e;
@@ -1455,7 +1460,8 @@ static void update_status(muse_mode_t mode, float now)
 #if CONFIG_MUSE_NANOMUSE
     if (thinking) {
         muse_nanomuse_reply_phase_t phase = muse_nanomuse_reply_phase();
-        if (phase == MUSE_NANOMUSE_PREPARING_AUDIO) name = "PREPARING AUDIO";
+        if (phase == MUSE_NANOMUSE_AWAITING_APPROVAL) name = "APPROVAL REQUIRED";
+        else if (phase == MUSE_NANOMUSE_PREPARING_AUDIO) name = "PREPARING AUDIO";
         else if (phase == MUSE_NANOMUSE_READING) { name = "REPLY"; thinking = false; }
     }
 #endif
@@ -1607,6 +1613,227 @@ void muse_ui_request_snapshot(void)
     s_snapshot = true;
 }
 
+#if CONFIG_MUSE_NANOMUSE
+static muse_nanomuse_approval_t s_approval_view;
+static lv_obj_t *s_approval_panel, *s_approval_body, *s_approval_text;
+static lv_obj_t *s_approval_title, *s_approval_allow, *s_approval_deny;
+static uint32_t s_approval_pressed_version;
+static muse_nanomuse_notifications_t s_notice_view;
+static lv_obj_t *s_notice_badge, *s_notice_badge_text, *s_notice_panel;
+static lv_obj_t *s_notice_title, *s_notice_body, *s_notice_text, *s_notice_read;
+static unsigned s_notice_index, s_notice_pressed_index;
+static uint32_t s_notice_pressed_version;
+static bool s_notice_open;
+
+static void render_notification(void)
+{
+    if (s_notice_index >= s_notice_view.count) s_notice_index = 0;
+    lv_label_set_text_fmt(s_notice_badge_text, "通知 %u", s_notice_view.count);
+    lv_label_set_text_fmt(s_notice_title, "通知 %u/%u", s_notice_index + 1, s_notice_view.count);
+    if (s_notice_view.count) {
+        const muse_nanomuse_notification_t *item = &s_notice_view.items[s_notice_index];
+        lv_label_set_text_fmt(s_notice_text, "%s\n\n%s", item->title, item->text);
+    }
+    if (s_notice_view.sending) lv_obj_add_state(s_notice_read, LV_STATE_DISABLED);
+    else lv_obj_remove_state(s_notice_read, LV_STATE_DISABLED);
+    lv_label_set_text(lv_obj_get_child(s_notice_read, 0), s_notice_view.sending ? "同步中" : "已读");
+    lv_obj_scroll_to_y(s_notice_body, 0, LV_ANIM_OFF);
+}
+
+static void on_notification(lv_event_t *event)
+{
+    intptr_t action = (intptr_t)lv_event_get_user_data(event);
+    if (lv_event_get_code(event) == LV_EVENT_PRESSED) {
+        s_notice_pressed_version = s_notice_view.version;
+        s_notice_pressed_index = s_notice_index;
+        return;
+    }
+    if (action == 0) s_notice_open = s_notice_view.count > 0;
+    else if (action == 1) s_notice_open = false;
+    else if (s_notice_view.count && action == 2)
+        s_notice_index = (s_notice_index + s_notice_view.count - 1) % s_notice_view.count;
+    else if (s_notice_view.count && action == 3)
+        s_notice_index = (s_notice_index + 1) % s_notice_view.count;
+    else if (action == 4 && s_notice_pressed_version == s_notice_view.version
+             && s_notice_pressed_index == s_notice_index) {
+        if (muse_nanomuse_notification_read(s_notice_view.version, s_notice_index))
+            s_notice_view.sending = true;
+        s_notice_pressed_version = 0;
+    }
+    render_notification();
+    muse_state_poke();
+}
+
+static lv_obj_t *notice_button(lv_obj_t *parent, const char *text, int action, int width, int height)
+{
+    lv_obj_t *button = lv_btn_create(parent);
+    lv_obj_set_size(button, width, height);
+    lv_obj_t *label = make_label(button, caption_font(), COLOR_LIT);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+    lv_obj_add_event_cb(button, on_notification, LV_EVENT_CLICKED, (void *)(intptr_t)action);
+    lv_obj_add_event_cb(button, on_notification, LV_EVENT_PRESSED, (void *)(intptr_t)action);
+    return button;
+}
+
+static void build_notifications(void)
+{
+    s_notice_badge = notice_button(lv_layer_top(), "通知", 0, 92, 32);
+    s_notice_badge_text = lv_obj_get_child(s_notice_badge, 0);
+    lv_obj_align(s_notice_badge, LV_ALIGN_TOP_RIGHT, -4, 4);
+    lv_obj_add_flag(s_notice_badge, LV_OBJ_FLAG_HIDDEN);
+    s_notice_panel = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_notice_panel);
+    lv_obj_set_size(s_notice_panel, s_w, s_h);
+    lv_obj_set_style_bg_opa(s_notice_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_notice_panel, lv_color_hex(0x10101c), 0);
+    lv_obj_remove_flag(s_notice_panel, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(s_notice_panel, LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE);
+    s_notice_title = make_label(s_notice_panel, caption_font(), COLOR_LIT);
+    lv_obj_set_pos(s_notice_title, 12, 12);
+    lv_obj_t *close = notice_button(s_notice_panel, "稍后", 1, 68, 32);
+    lv_obj_align(close, LV_ALIGN_TOP_RIGHT, -6, 4);
+    s_notice_body = lv_obj_create(s_notice_panel);
+    lv_obj_set_pos(s_notice_body, 8, 42);
+    lv_obj_set_size(s_notice_body, s_w - 16, s_h - 100);
+    lv_obj_set_style_bg_opa(s_notice_body, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_notice_body, 0, 0);
+    lv_obj_set_style_pad_all(s_notice_body, 4, 0);
+    lv_obj_set_scroll_dir(s_notice_body, LV_DIR_VER);
+    lv_obj_remove_flag(s_notice_body, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    s_notice_text = make_label(s_notice_body, caption_font(), COLOR_LIT);
+    lv_obj_set_style_text_line_space(s_notice_text, 4, 0);
+    lv_obj_set_width(s_notice_text, lv_pct(100));
+    lv_label_set_long_mode(s_notice_text, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_t *prev = notice_button(s_notice_panel, "上一条", 2, (s_w - 32) / 3, 44);
+    s_notice_read = notice_button(s_notice_panel, "已读", 4, (s_w - 32) / 3, 44);
+    lv_obj_t *next = notice_button(s_notice_panel, "下一条", 3, (s_w - 32) / 3, 44);
+    lv_obj_align(prev, LV_ALIGN_BOTTOM_LEFT, 8, -6);
+    lv_obj_align(s_notice_read, LV_ALIGN_BOTTOM_MID, 0, -6);
+    lv_obj_align(next, LV_ALIGN_BOTTOM_RIGHT, -8, -6);
+}
+
+static void update_notifications(void)
+{
+    char selected[33] = "";
+    if (s_notice_index < s_notice_view.count)
+        strlcpy(selected, s_notice_view.items[s_notice_index].token, sizeof(selected));
+    if (muse_nanomuse_notifications(&s_notice_view)) {
+        for (unsigned n = 0; n < s_notice_view.count; ++n)
+            if (!strcmp(selected, s_notice_view.items[n].token)) { s_notice_index = n; break; }
+        render_notification();
+    }
+    muse_mode_t mode = muse_state_mode(NULL);
+    bool busy = mode == MUSE_MODE_LISTENING || mode == MUSE_MODE_THINKING || mode == MUSE_MODE_SPEAKING;
+    bool settings = s_tv && lv_tileview_get_tile_active(s_tv) == s_settings;
+    if (!s_notice_view.count || busy || s_approval_view.pending) s_notice_open = false;
+    lv_obj_set_flag(s_notice_panel, LV_OBJ_FLAG_HIDDEN, !s_notice_open);
+    lv_obj_set_flag(s_notice_badge, LV_OBJ_FLAG_HIDDEN,
+                    !s_notice_view.count || s_notice_open || busy || settings || s_approval_view.pending
+                    || s_image_dsc.data);
+    if (s_notice_open) muse_state_poke();
+}
+
+static void on_approval(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_PRESSED) {
+        s_approval_pressed_version = s_approval_view.version;
+        return;
+    }
+    /* A gesture that started on an old card cannot approve its replacement. */
+    if (s_approval_pressed_version != s_approval_view.version) return;
+    s_approval_pressed_version = 0;
+    bool approved = lv_event_get_target(event) == s_approval_allow;
+    if (muse_nanomuse_decide(s_approval_view.version, approved)) {
+        lv_obj_add_state(s_approval_allow, LV_STATE_DISABLED);
+        lv_obj_add_state(s_approval_deny, LV_STATE_DISABLED);
+        lv_label_set_text(s_approval_title, "正在发送决定...");
+        muse_state_poke();
+    }
+}
+
+static void build_approval(void)
+{
+    s_approval_panel = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_approval_panel);
+    lv_obj_set_size(s_approval_panel, s_w, s_h);
+    lv_obj_set_style_bg_opa(s_approval_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_approval_panel, lv_color_hex(0x10101c), 0);
+    lv_obj_remove_flag(s_approval_panel, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(s_approval_panel, LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE);
+    s_approval_title = make_label(s_approval_panel, caption_font(), COLOR_LIT);
+    lv_obj_align(s_approval_title, LV_ALIGN_TOP_MID, 0, 8);
+    s_approval_body = lv_obj_create(s_approval_panel);
+    lv_obj_set_pos(s_approval_body, 8, 32);
+    lv_obj_set_size(s_approval_body, s_w - 16, s_h - 92);
+    lv_obj_set_style_bg_opa(s_approval_body, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_approval_body, 0, 0);
+    lv_obj_set_style_pad_all(s_approval_body, 4, 0);
+    lv_obj_set_scroll_dir(s_approval_body, LV_DIR_VER);
+    lv_obj_remove_flag(s_approval_body, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    s_approval_text = make_label(s_approval_body, caption_font(), COLOR_LIT);
+    lv_obj_set_width(s_approval_text, lv_pct(100));
+    lv_label_set_long_mode(s_approval_text, LV_LABEL_LONG_MODE_WRAP);
+    s_approval_deny = lv_btn_create(s_approval_panel);
+    s_approval_allow = lv_btn_create(s_approval_panel);
+    lv_obj_t *buttons[] = {s_approval_deny, s_approval_allow};
+    const char *labels[] = {"拒绝", "允许一次"};
+    for (int i = 0; i < 2; ++i) {
+        lv_obj_set_size(buttons[i], (s_w - 24) / 2, 44);
+        lv_obj_align(buttons[i], i ? LV_ALIGN_BOTTOM_RIGHT : LV_ALIGN_BOTTOM_LEFT, i ? -8 : 8, -6);
+        lv_obj_set_style_bg_color(buttons[i], lv_color_hex(i ? 0x206844 : 0x49414e), 0);
+        lv_obj_t *label = make_label(buttons[i], caption_font(), COLOR_LIT);
+        lv_label_set_text(label, labels[i]);
+        lv_obj_center(label);
+        lv_obj_add_event_cb(buttons[i], on_approval, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(buttons[i], on_approval, LV_EVENT_PRESSED, NULL);
+    }
+    /* A waking touch belongs to the sleep cover, never to an approval button. */
+    lv_obj_move_foreground(s_cover);
+}
+
+static void update_approval(void)
+{
+    if (muse_nanomuse_approval(&s_approval_view)) {
+        if (!s_approval_view.pending) {
+            lv_obj_add_flag(s_approval_panel, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_label_set_text(s_approval_text, s_approval_view.text);
+            lv_label_set_text(s_approval_title, s_approval_view.sending ? "正在发送决定..."
+                              : s_approval_view.error[0] ? s_approval_view.error : "操作确认（可上下滑动）");
+            lv_obj_set_width(s_approval_title, s_w - 16);
+            lv_label_set_long_mode(s_approval_title, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
+            if (s_approval_view.sending || !s_approval_view.can_approve)
+                lv_obj_add_state(s_approval_allow, LV_STATE_DISABLED);
+            else lv_obj_remove_state(s_approval_allow, LV_STATE_DISABLED);
+            if (s_approval_view.sending) lv_obj_add_state(s_approval_deny, LV_STATE_DISABLED);
+            else lv_obj_remove_state(s_approval_deny, LV_STATE_DISABLED);
+            if (lv_obj_has_flag(s_approval_panel, LV_OBJ_FLAG_HIDDEN))
+                lv_obj_scroll_to_y(s_approval_body, 0, LV_ANIM_OFF);
+            lv_obj_remove_flag(s_approval_panel, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_approval_view.pending) muse_state_poke();
+}
+#endif
+
+#if CONFIG_MUSE_NANOMUSE
+static void update_nanomuse_image(void)
+{
+    /* Present only a complete image, after speech/captions have finished.
+     * Never replace settings, a notification, or an approval the user is reading. */
+    if (muse_state_mode(NULL) == MUSE_MODE_IDLE && !s_approval_view.pending && !s_notice_open
+        && (!s_tv || lv_tileview_get_tile_active(s_tv) == s_face) && !muse_menu_is_open()) {
+        int w, h;
+        uint8_t *pixels = muse_nanomuse_image_take(&w, &h);
+        if (pixels) {
+            muse_ui_image_draw(0, 0, w, h, (const uint16_t *)pixels);
+            free(pixels);
+        }
+    }
+}
+#endif
+
 static volatile uint32_t s_frame_count;
 
 uint32_t muse_ui_frame_count(void) { return s_frame_count; }
@@ -1614,6 +1841,11 @@ uint32_t muse_ui_frame_count(void) { return s_frame_count; }
 static void frame_tick(lv_timer_t *timer)
 {
     ++s_frame_count;
+#if CONFIG_MUSE_NANOMUSE
+    update_approval();
+    update_notifications();
+    update_nanomuse_image();
+#endif
 #if LV_USE_SNAPSHOT
     if (s_bench_page >= 0) {
         bool settings = s_bench_page != 0;
@@ -1633,7 +1865,11 @@ static void frame_tick(lv_timer_t *timer)
     float now = (float)esp_timer_get_time() / 1e6f;
 
     if (mode != s_last_mode) {
-        if (mode == MUSE_MODE_LISTENING) {
+        if (mode == MUSE_MODE_LISTENING
+#if CONFIG_MUSE_NANOMUSE
+            || mode == MUSE_MODE_THINKING || mode == MUSE_MODE_SPEAKING
+#endif
+        ) {
             image_hide_locked();
             muse_ui_show_face();
         }
@@ -1724,6 +1960,10 @@ esp_err_t muse_ui_start(void)
         muse_menu_build(lv_screen_active(), s_w, s_h);
     }
     build_overlays();
+#if CONFIG_MUSE_NANOMUSE
+    build_notifications();
+    build_approval();
+#endif
     lv_timer_create(frame_tick, muse_board->frame_ms, NULL);
     s_ready = true;
     muse_board->display_unlock();
