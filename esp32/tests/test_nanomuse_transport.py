@@ -17,7 +17,7 @@ class TransportTests(unittest.TestCase):
             out = Path(folder)
             (out / "freertos").mkdir()
             headers = {
-                "sdkconfig.h": '#pragma once\n',
+                "sdkconfig.h": '#pragma once\n#define CONFIG_MUSE_BOARD_ID "m5stack_cores3"\n',
                 "esp_err.h": '#pragma once\n#include <assert.h>\ntypedef int esp_err_t;\n#define ESP_OK 0\n#define ESP_ERR_NO_MEM 1\n#define ESP_ERROR_CHECK(x) assert((x)==0)\n',
                 "esp_log.h": '#pragma once\n',
                 "esp_crt_bundle.h": '#pragma once\nstatic inline int esp_crt_bundle_attach(void *p) { return 0; }\n',
@@ -114,6 +114,23 @@ int main(void) {
     assert(muse_nanomuse_reply_phase()==MUSE_NANOMUSE_WAITING);
     json("{\"type\":\"hello\",\"protocol\":1}");
     assert(muse_hatch_ready());
+    /* Identity is sent once per negotiated connection, never to old gateways. */
+    s_ws=(void*)1;
+    send_device_identity(); assert(test_sends==0);
+    json("{\"type\":\"hello\",\"protocol\":1,\"device_identity\":true}");
+    send_device_identity(); assert(test_sends==1 && !s_identity_pending);
+    cJSON *identity=cJSON_Parse(test_last_send);
+    assert(!strcmp(cJSON_GetObjectItem(identity,"type")->valuestring,"identify"));
+    assert(!strcmp(cJSON_GetObjectItem(identity,"model")->valuestring,"m5stack_cores3"));
+    assert(!cJSON_GetObjectItem(identity,"key"));cJSON_Delete(identity);
+    send_device_identity();assert(test_sends==1);
+    ws_event(NULL,NULL,WEBSOCKET_EVENT_DISCONNECTED,NULL);
+    send_device_identity();assert(test_sends==1 && !s_identity_pending);
+    json("{\"type\":\"hello\",\"protocol\":1,\"device_identity\":true}");
+    test_now+=2000000;send_device_identity();assert(test_sends==2);
+    json("{\"type\":\"hello\",\"protocol\":1}");
+    send_device_identity();assert(test_sends==2 && !s_identity_pending);
+    test_sends=0;
     /* Idle notifications have no turn ID and never change the voice state. */
     json("{\"type\":\"hello\",\"protocol\":1,\"notifications\":true}");
     s_ws=(void*)1;

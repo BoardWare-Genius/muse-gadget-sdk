@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "sdkconfig.h"
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -35,6 +36,8 @@ static SemaphoreHandle_t s_lock;
 static TaskHandle_t s_worker;
 static esp_websocket_client_handle_t s_ws;
 static bool s_ready, s_active, s_recording, s_typed, s_finished, s_gateway_tts;
+static bool s_identity_pending;
+static int64_t s_identity_retry_at;
 static uint32_t s_id = 1, s_config_gen;
 static job_t s_queued;
 static int16_t *s_record;
@@ -209,6 +212,8 @@ static void receive_json(void)
             const cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "protocol");
             s_gateway_tts = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "tts"));
             s_ready = cJSON_IsNumber(p) && p->valueint == 1;
+            s_identity_pending = s_ready && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "device_identity"));
+            s_identity_retry_at = 0;
             strlcpy(s_detail, s_ready ? "Gateway ready" : "Gateway protocol mismatch", sizeof(s_detail));
             muse_link_set_state(s_ready ? MUSE_LINK_ONLINE : MUSE_LINK_ERROR);
             if (s_ready && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "notifications"))) {
@@ -400,11 +405,12 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t event, void *data
     esp_websocket_event_data_t *e = data;
     if (event == WEBSOCKET_EVENT_CONNECTED) {
         s_rx_n = 0; s_rx_bad = false;
-        LOCK(s_ready = false; strlcpy(s_detail, "Waiting for gateway", sizeof(s_detail)););
+        LOCK(s_ready = false; s_identity_pending = false; strlcpy(s_detail, "Waiting for gateway", sizeof(s_detail)););
     } else if (event == WEBSOCKET_EVENT_DISCONNECTED || event == WEBSOCKET_EVENT_ERROR
                || event == WEBSOCKET_EVENT_CLOSED) {
         LOCK({
             s_ready = false;
+            s_identity_pending = false;
             clear_image_locked();
             clear_approval_locked();
             strlcpy(s_detail, "Check gateway/address/key", sizeof(s_detail));
@@ -483,6 +489,29 @@ static bool send_approval_decision(uint32_t id)
     return ok;
 }
 
+/* Only the worker sends metadata, and only after a supporting gateway's hello.
+ * Older gateways never receive an unfamiliar message. The model comes from the
+ * selected board profile, not from the gateway URL or device credentials. */
+static void send_device_identity(void)
+{
+    bool send = false;
+    LOCK({
+        if (s_ready && s_identity_pending && esp_timer_get_time() >= s_identity_retry_at) {
+            send = true;
+            s_identity_retry_at = esp_timer_get_time() + 2000000;
+        }
+    });
+    if (!send || !s_ws || !esp_websocket_client_is_connected(s_ws)) return;
+    cJSON *j = cJSON_CreateObject();
+    if (!j) return;
+    cJSON_AddStringToObject(j, "type", "identify");
+    cJSON_AddStringToObject(j, "model", CONFIG_MUSE_BOARD_ID);
+    char *wire = cJSON_PrintUnformatted(j);
+    bool ok = wire && esp_websocket_client_send_text(s_ws, wire, strlen(wire), pdMS_TO_TICKS(2000)) == (int)strlen(wire);
+    free(wire); cJSON_Delete(j);
+    if (ok) LOCK(s_identity_pending = false;);
+}
+
 static void send_inbox_controls(void)
 {
     bool subscribe = false; char token[33] = "";
@@ -514,7 +543,7 @@ static void worker(void *arg)
         LOCK(gen = s_config_gen;);
         if (gen != config_gen) {
             if (s_ws) { esp_websocket_client_stop(s_ws); esp_websocket_client_destroy(s_ws); s_ws = NULL; }
-            LOCK(s_ready = false; clear_notifications_locked(););
+            LOCK(s_ready = false; s_identity_pending = false; clear_notifications_locked(););
             muse_settings_gateway(url, key);
             config_gen = gen;
             bool valid = (!strncmp(url, "ws://", 5) || !strncmp(url, "wss://", 6))
@@ -538,6 +567,7 @@ static void worker(void *arg)
             } else { LOCK(strlcpy(s_detail, "Set gateway URL and key", sizeof(s_detail));); }
             memset(key, 0, sizeof(key)); memset(headers, 0, sizeof(headers));
         }
+        send_device_identity();
         send_inbox_controls();
         job_t job = {0}; bool ready;
         LOCK({

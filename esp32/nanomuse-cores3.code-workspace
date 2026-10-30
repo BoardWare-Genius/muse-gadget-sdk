@@ -1,0 +1,41 @@
+{
+  "folders": [
+    {
+      "name": "nanoMuse CoreS3",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "idf.buildPath": "${workspaceFolder}/build-nanomuse-cores3",
+    "idf.sdkconfigFilePath": "${workspaceFolder}/build-nanomuse-cores3/sdkconfig",
+    "idf.sdkconfigDefaults": [
+      "sdkconfig.defaults",
+      "devices/sdkconfig.muse",
+      "devices/sdkconfig.muse-m5stack-cores3",
+      "sdkconfig.nanomuse"
+    ],
+    "idf.customExtraVars": {
+      "IDF_TARGET": "esp32s3"
+    },
+    "idf.openOcdConfigs": [
+      "board/esp32s3-builtin.cfg"
+    ],
+    "cmake.sourceDirectory": "${workspaceFolder}",
+    "cmake.buildDirectory": "${workspaceFolder}/build-nanomuse-cores3",
+    "cmake.configureArgs": [
+      "-DIDF_TARGET=esp32s3",
+      "-DSDKCONFIG=${workspaceFolder}/build-nanomuse-cores3/sdkconfig",
+      "-DSDKCONFIG_DEFAULTS=sdkconfig.defaults;devices/sdkconfig.muse;devices/sdkconfig.muse-m5stack-cores3;sdkconfig.nanomuse"
+    ],
+    "clangd.arguments": [
+      "--background-index",
+      "--query-driver=**",
+      "--compile-commands-dir=${workspaceFolder}/build-nanomuse-cores3"
+    ]
+  },
+  "extensions": {
+    "recommendations": [
+      "espressif.esp-idf-extension"
+    ]
+  }
+}

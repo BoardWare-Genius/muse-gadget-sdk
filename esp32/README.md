@@ -28,6 +28,30 @@ tried yet, and build your own Muse gadget.
 
 ## What you need
 
+### Local nanoMuse profile and Metalio device identity
+
+The `cores3-nanomuse-20261027` branch also includes a separate LAN nanoMuse
+profile, built with `tools/nanomuse.sh build` from this directory (ESP-IDF
+6.0.1). This profile uses the existing gateway URL and device key rather than
+the Muse cloud SDK token. See the companion `nanomuse-gateway` README for setup.
+
+For VS Code, open `nanomuse-cores3.code-workspace` in this directory and select
+your ESP-IDF 6.0.1 installation. It points build, flash and code navigation at
+`build-nanomuse-cores3/` and loads `sdkconfig.nanomuse` last. The ordinary Muse
+workspace uses a different profile; flashing its `build/` image replaces the
+LAN nanoMuse firmware. Keep Wi-Fi credentials and the device key in the ignored
+per-build `sdkconfig` or the device settings.
+
+When a gateway advertises `hello.device_identity: true`, this profile sends
+`{"type":"identify","model":"m5stack_cores3"}` using the selected board's
+`CONFIG_MUSE_BOARD_ID`. It resends after reconnecting and sends no identity
+message to older gateways. The optional metadata does not start a conversation
+or change device permissions. An updated gateway and Metalio console can then
+display **M5Stack CoreS3** and the connection's source IP. Older firmware still
+connects normally and appears as **Muse Gadget**, without a reported model.
+
+### Muse cloud profile
+
 - **An ESP32 board.** The quickest start is the **ESP32-C5 DevKitC-1**, which
   works as-is with its built-in status light and BOOT button. The other boards
   that already work are listed [below](#boards).
